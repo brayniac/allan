@@ -1,0 +1,20 @@
+[package]
+name = "allan"
+version = "0.1.0"
+authors = ["Brian Martin <brayniac@gmail.com>"]
+
+license = "MIT"
+
+description = "variance and deviation tools for stability analysis"
+
+homepage = "https://github.com/brayniac/allan"
+documentation = "http://brayniac.github.io/allan"
+repository = "https://github.com/brayniac/allan"
+
+readme = "README.md"
+
+keywords = [ "stability", "allan", "deviation", "variance" ]
+
+
+[dependencies]
+rand = "0.3"
