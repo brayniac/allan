@@ -26,29 +26,31 @@
 use std::collections::VecDeque;
 extern crate rand;
 
+#[derive(Clone)]
 pub struct Allan {
-    buffer: VecDeque<f64>,
-    samples: u32,
+    samples: usize,
+    config: AllanConfig,
     taus: Vec<Tau>,
+    buffer: VecDeque<f64>,
 }
 
 #[derive(Copy, Clone)]
-struct Tau {
+pub struct Tau {
     value: f64,
-    count: u32,
-    tau: u32,
+    count: u64,
+    tau: usize,
 }
 
 impl Tau {
-    pub fn new(tau: u32) -> Tau {
+    pub fn new(tau: usize) -> Tau {
         Tau {
             value: 0.0_f64,
-            count: 0_u32,
+            count: 0_u64,
             tau: tau,
         }
     }
 
-    pub fn tau(self) -> u32 {
+    pub fn tau(self) -> usize {
         self.tau
     }
 
@@ -57,17 +59,34 @@ impl Tau {
         self.count += 1;
     }
 
-    pub fn count(self) -> u32 {
+    pub fn count(self) -> u64 {
         self.count
     }
 
     pub fn value(self) -> f64 {
         self.value
     }
+
+    pub fn variance(self) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        Some(self.value() / (2.0_f64 * self.count() as f64 * self.tau() as f64))
+    }
+
+    pub fn deviation(self) -> Option<f64> {
+        match self.variance() {
+            Some(v) => {
+                Some(v.powf(0.5))
+            }
+            None => None
+        }
+    }
 }
 
+#[derive(Copy, Clone)]
 pub enum AllanStyle {
-    SingleTau(u64), // single specified Tau
+    SingleTau(usize), // single specified Tau
     AllTau, // all Tau from 1 ... Tau (inclusive)
     Decade, // 1,10,100, ... Tau (inclusive)
     DecadeDeci, // 1, 2, 3, .., 9, 10, 20, 30, .. Tau (inclusive)
@@ -77,6 +96,7 @@ pub enum AllanStyle {
     Octave, // 1, 2, 4, 8, 16, 32, ... Tau (inclusive)
 }
 
+#[derive(Copy, Clone)]
 pub struct AllanConfig {
     max_tau: usize,
     style: AllanStyle,
@@ -114,14 +134,14 @@ impl Allan {
         Allan::configured(config)
     }
 
-    fn decade_tau(max: u32, steps: Vec<u32>) -> Vec<Tau> {
+    fn decade_tau(max: usize, steps: Vec<usize>) -> Vec<Tau> {
         let mut p = 0;
-        let mut t = 1_u32;
+        let mut t = 1;
         let mut taus: Vec<Tau> = Vec::new();
 
         while t <= max {
             for i in &steps {
-                t = i * 10_u32.pow(p);
+                t = i * 10_u32.pow(p) as usize;
                 if t <= max {
                     taus.push(Tau::new(t));
                 }
@@ -132,7 +152,7 @@ impl Allan {
     }
 
     pub fn configured(config: AllanConfig) -> Option<Allan> {
-        let samples: u32 = (config.max_tau * 2 + 1) as u32; // this will vary by type
+        let samples = config.max_tau * 2 + 1; // this will vary by type
 
         let buffer = VecDeque::with_capacity(samples as usize);
 
@@ -141,23 +161,22 @@ impl Allan {
         match config.style {
             AllanStyle::AllTau => {
                 for t in 1..(config.max_tau + 1) {
-                    taus.push(Tau::new(t as u32));
+                    taus.push(Tau::new(t));
                 }
             }
-            AllanStyle::Decade125 => taus = Allan::decade_tau(config.max_tau as u32, vec![1, 2, 5]),
-            AllanStyle::Decade124 => taus = Allan::decade_tau(config.max_tau as u32, vec![1, 2, 4]),
-            AllanStyle::Decade1248 => {
-                taus = Allan::decade_tau(config.max_tau as u32, vec![1, 2, 4, 8])
-            }
+            AllanStyle::Decade125 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 5]),
+            AllanStyle::Decade124 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4]),
+            AllanStyle::Decade1248 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4, 8]),
             AllanStyle::DecadeDeci => {
-                taus = Allan::decade_tau(config.max_tau as u32, vec![1, 2, 3, 4, 5, 6, 7, 8, 9])
+                taus = Allan::decade_tau(config.max_tau, vec![1, 2, 3, 4, 5, 6, 7, 8, 9])
             }
-            AllanStyle::Decade => taus = Allan::decade_tau(config.max_tau as u32, vec![1]),
+            AllanStyle::Decade => taus = Allan::decade_tau(config.max_tau, vec![1]),
             _ => {}
         }
 
         Some(Allan {
             buffer: buffer,
+            config: config,
             samples: samples,
             taus: taus,
         })
@@ -167,7 +186,7 @@ impl Allan {
     pub fn record(&mut self, value: f64) {
         self.buffer.push_front(value);
         self.calculate();
-        if self.buffer.len() as u32 == self.samples {
+        if self.buffer.len() == self.samples {
             let _ = self.buffer.pop_back();
         }
     }
@@ -177,26 +196,32 @@ impl Allan {
         for tau in &mut self.taus {
             let t = tau.tau() as usize;
             if (2 * t) < self.buffer.len() {
-                // println!("calculating for: {}", t);
                 let var: f64 = self.buffer[(2 * t)] - 2.0_f64 * self.buffer[t] + self.buffer[0];
                 tau.add(var.powf(2.0_f64));
-            } else {
-                // println!("tau: {} too large", t);
             }
         }
     }
 
     // print things out
-    pub fn print(&mut self) {
-        for tau in &mut self.taus {
+    pub fn print(&self) {
+        for tau in &self.taus {
             if tau.count() >= 3 {
-                let dev = tau.value() / (2.0_f64 * tau.count() as f64);
-                let dev = dev.powf(0.5_f64);
-                let dev = dev / tau.tau() as f64;
-                println!("{} {}", dev, tau.tau());
+                println!("{} {}", tau.deviation().unwrap_or(0.0), tau.tau());
             } else {
                 println!("0.0 {}", tau.tau())
             }
         }
+    }
+
+    pub fn get(&self, tau: usize) -> Option<Tau> {
+        if tau > self.config.max_tau {
+            return None;
+        }
+        for t in &self.taus {
+            if t.tau() == tau {
+                Some(t.clone());
+            }
+        }
+        None
     }
 }
