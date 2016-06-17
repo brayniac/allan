@@ -19,21 +19,26 @@
 //!
 //! use allan::*;
 //!
-//! let mut adev = Allan::new().unwrap();
+//! // a default Allan
+//! let mut allan = Allan::new();
+//!
+//! // a configured Allan
+//! let mut allan = Allan::configure().max_tau(10_000).build().unwrap();
 
 #![crate_type = "lib"]
 
 use std::collections::VecDeque;
-extern crate rand;
 
+/// the main datastructure for Allan
 #[derive(Clone)]
 pub struct Allan {
     samples: usize,
-    config: AllanConfig,
+    config: Config,
     taus: Vec<Tau>,
     buffer: VecDeque<f64>,
 }
 
+/// a duration-based bucket for the stability metric
 #[derive(Copy, Clone)]
 pub struct Tau {
     value: f64,
@@ -42,7 +47,8 @@ pub struct Tau {
 }
 
 impl Tau {
-    pub fn new(tau: usize) -> Tau {
+    // construct a new `Tau`
+    fn new(tau: usize) -> Tau {
         Tau {
             value: 0.0_f64,
             count: 0_u64,
@@ -50,23 +56,28 @@ impl Tau {
         }
     }
 
+    /// returns the time value of the `Tau`
     pub fn tau(self) -> usize {
         self.tau
     }
 
-    pub fn add(&mut self, value: f64) {
+    // add a value to the `Tau`
+    fn add(&mut self, value: f64) {
         self.value += value;
         self.count += 1;
     }
 
+    /// returns the count of samples at `Tau`
     pub fn count(self) -> u64 {
         self.count
     }
 
+    // return the sum at `Tau`
     pub fn value(self) -> f64 {
         self.value
     }
 
+    /// returns the Allan Variance at `Tau`
     pub fn variance(self) -> Option<f64> {
         if self.count == 0 {
             return None;
@@ -74,18 +85,18 @@ impl Tau {
         Some(self.value() / (2.0_f64 * self.count() as f64 * self.tau() as f64))
     }
 
+    /// returns the Allan Deviation at `Tau`
     pub fn deviation(self) -> Option<f64> {
         match self.variance() {
-            Some(v) => {
-                Some(v.powf(0.5))
-            }
-            None => None
+            Some(v) => Some(v.powf(0.5)),
+            None => None,
         }
     }
 }
 
+/// describes the gaps between `Tau` and impacts space and computational costs
 #[derive(Copy, Clone)]
-pub enum AllanStyle {
+pub enum Style {
     SingleTau(usize), // single specified Tau
     AllTau, // all Tau from 1 ... Tau (inclusive)
     Decade, // 1,10,100, ... Tau (inclusive)
@@ -93,21 +104,30 @@ pub enum AllanStyle {
     Decade124, // 1, 2, 4, 10, 20, 40, ... Tau (inclusive)
     Decade1248, // 1, 2, 4, 8, 10, 20, 40, ... Tau (inclusive)
     Decade125, // 1, 2, 5, 10, 20, 50, ... Tau (inclusive)
-    Octave, // 1, 2, 4, 8, 16, 32, ... Tau (inclusive)
 }
 
+/// used to configure an `Allan`
 #[derive(Copy, Clone)]
-pub struct AllanConfig {
+pub struct Config {
     max_tau: usize,
-    style: AllanStyle,
+    style: Style,
 }
 
-impl AllanConfig {
-    pub fn new() -> AllanConfig {
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            max_tau: 1_000,
+            style: Style::DecadeDeci,
+        }
+    }
+}
+
+impl Config {
+    pub fn new() -> Config {
         Default::default()
     }
 
-    pub fn style(&mut self, style: AllanStyle) -> &Self {
+    pub fn style(&mut self, style: Style) -> &Self {
         self.style = style;
         self
     }
@@ -116,22 +136,22 @@ impl AllanConfig {
         self.max_tau = max_tau;
         self
     }
+
+    pub fn build(self) -> Option<Allan> {
+        Allan::configured(self)
+    }
 }
 
-impl Default for AllanConfig {
-    fn default() -> AllanConfig {
-        AllanConfig {
-            max_tau: 1_000,
-            style: AllanStyle::DecadeDeci,
-        }
+impl Default for Allan {
+    fn default() -> Allan {
+        Config::default().build().unwrap()
     }
 }
 
 impl Allan {
     /// create a new Allan
-    pub fn new() -> Option<Allan> {
-        let config = AllanConfig::new();
-        Allan::configured(config)
+    pub fn new() -> Allan {
+        Default::default()
     }
 
     fn decade_tau(max: usize, steps: Vec<usize>) -> Vec<Tau> {
@@ -151,7 +171,11 @@ impl Allan {
         taus
     }
 
-    pub fn configured(config: AllanConfig) -> Option<Allan> {
+    pub fn configure() -> Config {
+        Config::default()
+    }
+
+    fn configured(config: Config) -> Option<Allan> {
         let samples = config.max_tau * 2 + 1; // this will vary by type
 
         let buffer = VecDeque::with_capacity(samples as usize);
@@ -159,19 +183,21 @@ impl Allan {
         let mut taus: Vec<Tau> = Vec::new();
 
         match config.style {
-            AllanStyle::AllTau => {
+            Style::SingleTau(t) => {
+                taus.push(Tau::new(t));
+            }
+            Style::AllTau => {
                 for t in 1..(config.max_tau + 1) {
                     taus.push(Tau::new(t));
                 }
             }
-            AllanStyle::Decade125 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 5]),
-            AllanStyle::Decade124 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4]),
-            AllanStyle::Decade1248 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4, 8]),
-            AllanStyle::DecadeDeci => {
+            Style::Decade125 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 5]),
+            Style::Decade124 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4]),
+            Style::Decade1248 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4, 8]),
+            Style::DecadeDeci => {
                 taus = Allan::decade_tau(config.max_tau, vec![1, 2, 3, 4, 5, 6, 7, 8, 9])
             }
-            AllanStyle::Decade => taus = Allan::decade_tau(config.max_tau, vec![1]),
-            _ => {}
+            Style::Decade => taus = Allan::decade_tau(config.max_tau, vec![1]),
         }
 
         Some(Allan {
@@ -191,8 +217,8 @@ impl Allan {
         }
     }
 
-    /// recalculate values
-    pub fn calculate(&mut self) {
+    // recalculate values
+    fn calculate(&mut self) {
         for tau in &mut self.taus {
             let t = tau.tau() as usize;
             if (2 * t) < self.buffer.len() {
@@ -202,7 +228,7 @@ impl Allan {
         }
     }
 
-    // print things out
+    /// print deviations for all `Tau`
     pub fn print(&self) {
         for tau in &self.taus {
             if tau.count() >= 3 {
@@ -213,13 +239,14 @@ impl Allan {
         }
     }
 
+    /// get a single `Tau` from the `Allan`
     pub fn get(&self, tau: usize) -> Option<Tau> {
         if tau > self.config.max_tau {
             return None;
         }
         for t in &self.taus {
             if t.tau() == tau {
-                Some(t.clone());
+                return Some(*t);
             }
         }
         None

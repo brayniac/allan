@@ -1,6 +1,6 @@
 [package]
 name = "allan"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Brian Martin <brayniac@gmail.com>"]
 
 license = "MIT"
@@ -14,7 +14,3 @@ repository = "https://github.com/brayniac/allan"
 readme = "README.md"
 
 keywords = [ "stability", "allan", "deviation", "variance" ]
-
-
-[dependencies]
-rand = "0.3"
