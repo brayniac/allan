@@ -4,9 +4,6 @@
 //! * provide streaming variance and deviations from series data
 //! * pre-allocated datastructures
 //!
-//! # Future work
-//! * actually finishing it
-//!
 //! # Usage
 //!
 //! Create a new instance, add records, retrieve statistic
@@ -21,6 +18,10 @@
 //!
 //! // a default Allan
 //! let mut allan = Allan::new();
+//! for _ in 0..100 {
+//!     allan.record(1.0);
+//! }
+//! assert_eq!(allan.get(1).unwrap().deviation().unwrap(), 0.0);
 //!
 //! // a configured Allan
 //! let mut allan = Allan::configure().max_tau(10_000).build().unwrap();

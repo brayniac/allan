@@ -20,6 +20,9 @@ Then, add this to your crate root:
 extern crate allan;
 ```
 
+The API documentation of this library can be found at
+[brayniac.github.io/allan](https://brayniac.github.io/allan/).
+
 ## Features
 
 * None yet
