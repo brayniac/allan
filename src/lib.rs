@@ -128,12 +128,12 @@ impl Config {
         Default::default()
     }
 
-    pub fn style(&mut self, style: Style) -> &Self {
+    pub fn style(mut self, style: Style) -> Self {
         self.style = style;
         self
     }
 
-    pub fn max_tau(&mut self, max_tau: usize) -> &Self {
+    pub fn max_tau(mut self, max_tau: usize) -> Self {
         self.max_tau = max_tau;
         self
     }
@@ -233,7 +233,7 @@ impl Allan {
     pub fn print(&self) {
         for tau in &self.taus {
             if tau.count() >= 3 {
-                println!("{} {}", tau.deviation().unwrap_or(0.0), tau.tau());
+                println!("{} {}", tau.variance().unwrap_or(0.0), tau.tau());
             } else {
                 println!("0.0 {}", tau.tau())
             }
