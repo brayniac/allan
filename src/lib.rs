@@ -83,15 +83,15 @@ impl Tau {
         if self.count == 0 {
             return None;
         }
-        Some(self.value() / (2.0_f64 * self.count() as f64 * self.tau() as f64))
+        Some(self.value() / (2.0_f64 * self.count() as f64) / self.tau() as f64)
     }
 
     /// returns the Allan Deviation at `Tau`
     pub fn deviation(self) -> Option<f64> {
-        match self.variance() {
-            Some(v) => Some(v.powf(0.5)),
-            None => None,
+        if self.count == 0 {
+            return None;
         }
+        Some((self.value() / (2.0_f64 * self.count() as f64)).powf(0.5) / self.tau() as f64)
     }
 }
 
