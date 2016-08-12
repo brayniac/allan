@@ -14,3 +14,5 @@ repository = "https://github.com/brayniac/allan"
 readme = "README.md"
 
 keywords = [ "stability", "allan", "deviation", "variance" ]
+
+include = [ "src/**/*", "README.md", "LICENSE-*", "Cargo.toml" ]
