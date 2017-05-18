@@ -3,7 +3,4 @@ rust:
 - stable
 - beta
 - nightly
-os:
-- linux
-- osx
-after_success: sh scripts/travis-doc-upload.sh
+os: linux
