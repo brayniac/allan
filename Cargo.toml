@@ -3,16 +3,14 @@ name = "allan"
 version = "0.2.1"
 authors = ["Brian Martin <brayniac@gmail.com>"]
 
-license = "MIT"
+license = "MIT/Apache-2.0"
 
-description = "variance and deviation tools for stability analysis"
+description = "allan variance and deviation"
 
 homepage = "https://github.com/brayniac/allan"
-documentation = "http://brayniac.github.io/allan"
+documentation = "https://docs.rs/allan"
 repository = "https://github.com/brayniac/allan"
 
 readme = "README.md"
 
 keywords = [ "stability", "allan", "deviation", "variance" ]
-
-include = [ "src/**/*", "README.md", "LICENSE-*", "Cargo.toml" ]
