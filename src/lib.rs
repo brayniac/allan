@@ -202,11 +202,11 @@ impl Allan {
         }
 
         Some(Allan {
-            buffer: buffer,
-            config: config,
-            samples: samples,
-            taus: taus,
-        })
+                 buffer: buffer,
+                 config: config,
+                 samples: samples,
+                 taus: taus,
+             })
     }
 
     /// add a record
