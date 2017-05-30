@@ -26,7 +26,7 @@
 //! // a configured Allan
 //! let mut allan = Allan::configure().max_tau(10_000).build().unwrap();
 
-#![crate_type = "lib"]
+#![deny(warnings)]
 
 use std::collections::VecDeque;
 
