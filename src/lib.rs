@@ -83,7 +83,9 @@ impl Tau {
         if self.count == 0 {
             return None;
         }
-        Some(self.value() / (2.0_f64 * self.count() as f64) / self.tau() as f64)
+        Some(
+            self.value() / (2.0_f64 * self.count() as f64) / self.tau() as f64,
+        )
     }
 
     /// returns the Allan Deviation at `Tau`
@@ -91,7 +93,9 @@ impl Tau {
         if self.count == 0 {
             return None;
         }
-        Some((self.value() / (2.0_f64 * self.count() as f64)).powf(0.5) / self.tau() as f64)
+        Some(
+            (self.value() / (2.0_f64 * self.count() as f64)).powf(0.5) / self.tau() as f64,
+        )
     }
 }
 
@@ -202,11 +206,11 @@ impl Allan {
         }
 
         Some(Allan {
-                 buffer: buffer,
-                 config: config,
-                 samples: samples,
-                 taus: taus,
-             })
+            buffer: buffer,
+            config: config,
+            samples: samples,
+            taus: taus,
+        })
     }
 
     /// add a record
