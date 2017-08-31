@@ -101,12 +101,12 @@ impl Tau {
 #[derive(Copy, Clone)]
 pub enum Style {
     SingleTau(usize), // single specified Tau
-    AllTau,           // all Tau from 1 ... Tau (inclusive)
-    Decade,           // 1,10,100, ... Tau (inclusive)
-    DecadeDeci,       // 1, 2, 3, .., 9, 10, 20, 30, .. Tau (inclusive)
-    Decade124,        // 1, 2, 4, 10, 20, 40, ... Tau (inclusive)
-    Decade1248,       // 1, 2, 4, 8, 10, 20, 40, ... Tau (inclusive)
-    Decade125,        // 1, 2, 5, 10, 20, 50, ... Tau (inclusive)
+    AllTau, // all Tau from 1 ... Tau (inclusive)
+    Decade, // 1,10,100, ... Tau (inclusive)
+    DecadeDeci, // 1, 2, 3, .., 9, 10, 20, 30, .. Tau (inclusive)
+    Decade124, // 1, 2, 4, 10, 20, 40, ... Tau (inclusive)
+    Decade1248, // 1, 2, 4, 8, 10, 20, 40, ... Tau (inclusive)
+    Decade125, // 1, 2, 5, 10, 20, 50, ... Tau (inclusive)
 }
 
 /// used to configure an `Allan`
@@ -189,9 +189,11 @@ impl Allan {
             Style::SingleTau(t) => {
                 taus.push(Tau::new(t));
             }
-            Style::AllTau => for t in 1..(config.max_tau + 1) {
-                taus.push(Tau::new(t));
-            },
+            Style::AllTau => {
+                for t in 1..(config.max_tau + 1) {
+                    taus.push(Tau::new(t));
+                }
+            }
             Style::Decade125 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 5]),
             Style::Decade124 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4]),
             Style::Decade1248 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4, 8]),
