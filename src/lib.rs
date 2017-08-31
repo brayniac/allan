@@ -26,8 +26,6 @@
 //! // a configured Allan
 //! let mut allan = Allan::configure().max_tau(10_000).build().unwrap();
 
-#![deny(warnings)]
-
 use std::collections::VecDeque;
 
 /// the main datastructure for Allan
@@ -255,5 +253,73 @@ impl Allan {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate probability;
+    extern crate rand;
+
+    use self::probability::prelude::*;
+    use self::rand::distributions::{IndependentSample, Range};
+    use super::*;
+
+    #[test]
+    fn white_noise() {
+        let mut allan = Allan::configure()
+            .max_tau(1000)
+            .style(Style::AllTau)
+            .build()
+            .unwrap();
+        let mut rng = rand::thread_rng();
+        let between = Range::new(0.0, 1.0);
+        for _ in 0..10_000 {
+            let v = between.ind_sample(&mut rng);
+            allan.record(v);
+        }
+        for t in 1..1000 {
+            let v = allan
+                .get(t)
+                .unwrap_or_else(|| {
+                    print!("error fetching for tau: {}", t);
+                    panic!("error")
+                })
+                .deviation()
+                .unwrap() * t as f64;
+            if v <= 0.4 || v >= 0.6 {
+                panic!("tau: {} value: {} outside of range", t, v);
+            }
+        }
+    }
+
+    #[test]
+    fn pink_noise() {
+        let mut allan = Allan::configure()
+            .max_tau(1000)
+            .style(Style::AllTau)
+            .build()
+            .unwrap();
+
+        let mut source = source::default();
+        let distribution = Beta::new(1.0, 3.0, 0.0, 1.0);
+
+        for _ in 0..10_000 {
+            let v = distribution.sample(&mut source);
+            allan.record(v);
+        }
+        for t in 1..1000 {
+            let v = allan
+                .get(t)
+                .unwrap_or_else(|| {
+                    println!("error fetching for tau: {}", t);
+                    panic!("error")
+                })
+                .deviation()
+                .unwrap() * t as f64 * 0.5;
+            if v <= 0.1 || v >= 0.3 {
+                panic!("tau: {} value: {} outside of range", t, v);
+            }
+        }
     }
 }
