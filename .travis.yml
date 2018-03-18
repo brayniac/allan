@@ -9,7 +9,7 @@ env: TYPE=default RUST_BACKTRACE=1
 matrix:
   include:
     - os: linux
-      rust: stable
+      rust: nightly
       env: TYPE=rustfmt RUST_BACKTRACE=1
       script:
         - cargo install -f rustfmt || exit 0
