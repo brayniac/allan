@@ -26,15 +26,15 @@
 //! // a configured Allan
 //! let mut allan = Allan::configure().max_tau(10_000).build().unwrap();
 
-use std::collections::VecDeque;
-
 /// the main datastructure for Allan
 #[derive(Clone)]
 pub struct Allan {
     samples: usize,
     config: Config,
     taus: Vec<Tau>,
-    buffer: VecDeque<f64>,
+    buffer: Vec<f64>,
+    head: usize,  // Index where the next element will be written
+    len: usize,   // Current number of elements in the buffer
 }
 
 /// a duration-based bucket for the stability metric
@@ -180,7 +180,9 @@ impl Allan {
     fn configured(config: Config) -> Option<Allan> {
         let samples = config.max_tau * 2 + 1; // this will vary by type
 
-        let buffer = VecDeque::with_capacity(samples as usize);
+        let mut buffer = Vec::with_capacity(samples);
+        // Initialize buffer with zeros
+        buffer.resize(samples, 0.0);
 
         let mut taus: Vec<Tau> = Vec::new();
 
@@ -203,28 +205,55 @@ impl Allan {
         }
 
         Some(Allan {
-            buffer: buffer,
-            config: config,
-            samples: samples,
-            taus: taus,
+            buffer,
+            config,
+            samples,
+            taus,
+            head: 0,
+            len: 0,
         })
     }
 
     /// add a record
     pub fn record(&mut self, value: f64) {
-        self.buffer.push_front(value);
-        self.calculate();
-        if self.buffer.len() == self.samples {
-            let _ = self.buffer.pop_back();
+        if self.len < self.samples {
+            // Buffer not full yet, add to the end
+            self.buffer[self.len] = value;
+            self.len += 1;
+        } else {
+            // Buffer is full, replace oldest value
+            self.buffer[self.head] = value;
+            self.head = (self.head + 1) % self.samples;
         }
+
+        // Calculate after adding the value
+        self.calculate();
     }
 
     // recalculate values
     fn calculate(&mut self) {
+        let len = self.len;
+        let head = self.head;
+        let samples = self.samples;
+
         for tau in &mut self.taus {
             let t = tau.tau() as usize;
-            if (2 * t) < self.buffer.len() {
-                let var: f64 = self.buffer[2 * t] - 2.0_f64 * self.buffer[t] + self.buffer[0];
+            // Need at least 2*tau + 1 samples
+            if len > 2 * t {
+                // Calculate indices inline to avoid borrow issues
+                let (idx0, idx1, idx2) = if len < samples {
+                    // Buffer not wrapped yet
+                    (len - 1, len - 1 - t, len - 1 - 2 * t)
+                } else {
+                    // Buffer has wrapped, use circular indexing
+                    (
+                        (head + samples - 1) % samples,
+                        (head + samples - 1 - t) % samples,
+                        (head + samples - 1 - 2 * t) % samples,
+                    )
+                };
+
+                let var: f64 = self.buffer[idx2] - 2.0_f64 * self.buffer[idx1] + self.buffer[idx0];
                 tau.add(var * var);
             }
         }
