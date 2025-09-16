@@ -38,25 +38,25 @@ pub struct Allan {
 }
 
 /// a duration-based bucket for the stability metric
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Tau {
     value: f64,
     count: u64,
-    tau: usize,
+    tau: u32,  // Changed from usize to u32 - tau values unlikely to exceed u32::MAX
 }
 
 impl Tau {
     // construct a new `Tau`
-    fn new(tau: usize) -> Tau {
+    fn new(tau: u32) -> Tau {
         Tau {
-            value: 0.0_f64,
-            count: 0_u64,
-            tau: tau,
+            value: 0.0,
+            count: 0,
+            tau,
         }
     }
 
     /// returns the time value of the `Tau`
-    pub fn tau(self) -> usize {
+    pub fn tau(&self) -> u32 {
         self.tau
     }
 
@@ -67,45 +67,44 @@ impl Tau {
     }
 
     /// returns the count of samples at `Tau`
-    pub fn count(self) -> u64 {
+    pub fn count(&self) -> u64 {
         self.count
     }
 
     // return the sum at `Tau`
-    pub fn value(self) -> f64 {
+    pub fn value(&self) -> f64 {
         self.value
     }
 
     /// returns the Allan Variance at `Tau`
-    pub fn variance(self) -> Option<f64> {
+    pub fn variance(&self) -> Option<f64> {
         if self.count == 0 {
             return None;
         }
-        Some(self.value() / (2.0_f64 * self.count() as f64 * (self.tau() * self.tau()) as f64))
+        let tau_squared = (self.tau as f64) * (self.tau as f64);
+        Some(self.value / (2.0 * self.count as f64 * tau_squared))
     }
 
     /// returns the Allan Deviation at `Tau`
-    pub fn deviation(self) -> Option<f64> {
+    pub fn deviation(&self) -> Option<f64> {
         if self.count == 0 {
             return None;
         }
-        Some(
-            (self.value() / (2.0_f64 * self.count() as f64 * (self.tau() * self.tau()) as f64))
-                .sqrt(),
-        )
+        let tau_squared = (self.tau as f64) * (self.tau as f64);
+        Some((self.value / (2.0 * self.count as f64 * tau_squared)).sqrt())
     }
 }
 
 /// describes the gaps between `Tau` and impacts space and computational costs
 #[derive(Copy, Clone)]
 pub enum Style {
-    SingleTau(usize), // single specified Tau
-    AllTau,           // all Tau from 1 ... Tau (inclusive)
-    Decade,           // 1,10,100, ... Tau (inclusive)
-    DecadeDeci,       // 1, 2, 3, .., 9, 10, 20, 30, .. Tau (inclusive)
-    Decade124,        // 1, 2, 4, 10, 20, 40, ... Tau (inclusive)
-    Decade1248,       // 1, 2, 4, 8, 10, 20, 40, ... Tau (inclusive)
-    Decade125,        // 1, 2, 5, 10, 20, 50, ... Tau (inclusive)
+    SingleTau(u32), // single specified Tau
+    AllTau,         // all Tau from 1 ... Tau (inclusive)
+    Decade,         // 1,10,100, ... Tau (inclusive)
+    DecadeDeci,     // 1, 2, 3, .., 9, 10, 20, 30, .. Tau (inclusive)
+    Decade124,      // 1, 2, 4, 10, 20, 40, ... Tau (inclusive)
+    Decade1248,     // 1, 2, 4, 8, 10, 20, 40, ... Tau (inclusive)
+    Decade125,      // 1, 2, 5, 10, 20, 50, ... Tau (inclusive)
 }
 
 /// used to configure an `Allan`
@@ -156,16 +155,34 @@ impl Allan {
         Default::default()
     }
 
-    fn decade_tau(max: usize, steps: Vec<usize>) -> Vec<Tau> {
+    fn decade_tau(max: usize, steps: &[usize]) -> Vec<Tau> {
+        // Pre-calculate capacity to avoid reallocations
+        let mut capacity = 0;
         let mut p = 0;
-        let mut t = 1;
-        let mut taus: Vec<Tau> = Vec::new();
+        loop {
+            let base = 10_usize.pow(p);
+            if base > max {
+                break;
+            }
+            for &step in steps {
+                if step * base <= max {
+                    capacity += 1;
+                }
+            }
+            p += 1;
+        }
 
-        while t <= max {
-            for i in &steps {
-                t = i * 10_u32.pow(p) as usize;
+        let mut taus = Vec::with_capacity(capacity);
+        p = 0;
+        loop {
+            let base = 10_usize.pow(p);
+            if base > max {
+                break;
+            }
+            for &step in steps {
+                let t = step * base;
                 if t <= max {
-                    taus.push(Tau::new(t));
+                    taus.push(Tau::new(t as u32));
                 }
             }
             p += 1;
@@ -192,16 +209,16 @@ impl Allan {
             }
             Style::AllTau => {
                 for t in 1..(config.max_tau + 1) {
-                    taus.push(Tau::new(t));
+                    taus.push(Tau::new(t as u32));
                 }
             }
-            Style::Decade125 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 5]),
-            Style::Decade124 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4]),
-            Style::Decade1248 => taus = Allan::decade_tau(config.max_tau, vec![1, 2, 4, 8]),
+            Style::Decade125 => taus = Allan::decade_tau(config.max_tau, &[1, 2, 5]),
+            Style::Decade124 => taus = Allan::decade_tau(config.max_tau, &[1, 2, 4]),
+            Style::Decade1248 => taus = Allan::decade_tau(config.max_tau, &[1, 2, 4, 8]),
             Style::DecadeDeci => {
-                taus = Allan::decade_tau(config.max_tau, vec![1, 2, 3, 4, 5, 6, 7, 8, 9])
+                taus = Allan::decade_tau(config.max_tau, &[1, 2, 3, 4, 5, 6, 7, 8, 9])
             }
-            Style::Decade => taus = Allan::decade_tau(config.max_tau, vec![1]),
+            Style::Decade => taus = Allan::decade_tau(config.max_tau, &[1]),
         }
 
         Some(Allan {
@@ -253,7 +270,7 @@ impl Allan {
                     )
                 };
 
-                let var: f64 = self.buffer[idx2] - 2.0_f64 * self.buffer[idx1] + self.buffer[idx0];
+                let var: f64 = self.buffer[idx2] - 2.0 * self.buffer[idx1] + self.buffer[idx0];
                 tau.add(var * var);
             }
         }
@@ -271,13 +288,13 @@ impl Allan {
     }
 
     /// get a single `Tau` from the `Allan`
-    pub fn get(&self, tau: usize) -> Option<Tau> {
+    pub fn get(&self, tau: usize) -> Option<&Tau> {
         if tau > self.config.max_tau {
             return None;
         }
         for t in &self.taus {
-            if t.tau() == tau {
-                return Some(*t);
+            if t.tau() == tau as u32 {
+                return Some(t);
             }
         }
         None
