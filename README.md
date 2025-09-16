@@ -1,43 +1,42 @@
 # allan - variance and deviation tools for stability analysis
 
-allan is a library implementing Allan Variance and Deviation
-for stability analysis of oscillators, gyroscopes, etc
+[![crates.io](https://img.shields.io/crates/v/allan.svg)](https://crates.io/crates/allan)
+[![License](https://img.shields.io/crates/l/allan.svg)](#license)
 
-[![conduct-badge][]][conduct] [![downloads-badge][] ![release-badge][]][crate] [![license-badge][]](#license)
+A Rust implementation of Allan variance and deviation calculations for analyzing the stability and noise characteristics of time-series data. This is particularly useful for characterizing frequency standards, oscillators, gyroscopes, and other precision measurement instruments.
 
-[conduct-badge]: https://img.shields.io/badge/%E2%9D%A4-code%20of%20conduct-blue.svg
-[downloads-badge]: https://img.shields.io/crates/d/allan.svg
-[release-badge]: https://img.shields.io/crates/v/allan.svg
-[license-badge]: https://img.shields.io/crates/l/allan.svg
-[conduct]: https://brayniac.github.io/conduct
-[crate]: https://crates.io/crates/allan
-[Cargo]: https://github.com/rust-lang/cargo
+## Overview
 
-## Code of Conduct
+Allan variance is a method of representing frequency stability in oscillators and other time-series data. Unlike standard deviation, Allan variance converges for most types of noise commonly found in physical systems and can distinguish between different noise types.
 
-**NOTE**: All conversations and contributions to this project shall adhere to the [Code of Conduct][conduct]
+This library provides:
+- Overlapping Allan variance (AVAR) and Allan deviation (ADEV) calculations
+- Configurable tau (averaging time) ranges with multiple spacing options
+- Streaming calculation with efficient circular buffer implementation
+- Support for real-time analysis of continuous data streams
 
-## Usage
-
-To use `allan`, first add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-allan = "*"
-```
-
-Then, add this to your crate root:
+## Example
 
 ```rust
-extern crate allan;
+use allan::Allan;
+
+// Create a new Allan variance calculator
+let mut allan = Allan::new();
+
+// Add data points from your measurements
+for sample in measurements {
+    allan.record(sample);
+}
+
+// Get the Allan deviation at τ=1
+let tau_1 = allan.get(1).unwrap();
+println!("Allan deviation at τ=1: {}", tau_1.deviation().unwrap());
+println!("Allan variance at τ=1: {}", tau_1.variance().unwrap());
 ```
 
-The API documentation of this library can be found at
-[docs.rs/allan](https://docs.rs/allan/).
+## Documentation
 
-## Features
-
-* Calculate overlapping Allan Deviation and Variance
+API documentation is available at [docs.rs/allan](https://docs.rs/allan/).
 
 ## License
 
