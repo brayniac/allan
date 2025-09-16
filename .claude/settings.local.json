@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test)",
+      "Bash(cargo test:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(gh repo set-default-branch:*)",
+      "Bash(gh api:*)",
+      "Bash(cargo build:*)",
+      "Bash(git add:*)",
+      "Bash(sed:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo bench:*)",
+      "Bash(git commit:*)",
+      "Bash(./target/release/deps/sliding_bench-6380afca2a2defa5)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
