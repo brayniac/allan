@@ -11,6 +11,8 @@ Allan variance is a method of representing frequency stability in oscillators an
 
 This library provides:
 - Overlapping Allan variance (AVAR) and Allan deviation (ADEV) calculations
+- Modified Allan variance (MVAR) and Modified Allan deviation (MDEV) calculations
+- Overlapping Hadamard variance (HVAR) and Hadamard deviation (HDEV) calculations
 - Configurable tau (averaging time) ranges with multiple spacing options
 - Streaming calculation with efficient circular buffer implementation
 - Support for real-time analysis of continuous data streams
@@ -18,20 +20,37 @@ This library provides:
 ## Example
 
 ```rust
-use allan::Allan;
+use allan::{Allan, ModifiedAllan, Hadamard};
 
-// Create a new Allan variance calculator
+// Allan variance/deviation
 let mut allan = Allan::new();
-
-// Add data points from your measurements
-for sample in measurements {
-    allan.record(sample);
+for sample in measurements.iter() {
+    allan.record(*sample);
 }
 
-// Get the Allan deviation at τ=1
 let tau_1 = allan.get(1).unwrap();
 println!("Allan deviation at τ=1: {}", tau_1.deviation().unwrap());
 println!("Allan variance at τ=1: {}", tau_1.variance().unwrap());
+
+// Modified Allan variance/deviation (better white PM noise rejection)
+let mut modified = ModifiedAllan::new();
+for sample in measurements.iter() {
+    modified.record(*sample);
+}
+
+let tau_1 = modified.get(1).unwrap();
+println!("Modified Allan deviation at τ=1: {}", tau_1.deviation().unwrap());
+println!("Modified Allan variance at τ=1: {}", tau_1.variance().unwrap());
+
+// Hadamard variance/deviation (3rd difference, better drift rejection)
+let mut hadamard = Hadamard::new();
+for sample in measurements.iter() {
+    hadamard.record(*sample);
+}
+
+let tau_1 = hadamard.get(1).unwrap();
+println!("Hadamard deviation at τ=1: {}", tau_1.deviation().unwrap());
+println!("Hadamard variance at τ=1: {}", tau_1.variance().unwrap());
 ```
 
 ## Documentation
