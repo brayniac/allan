@@ -38,6 +38,11 @@
 //! assert_eq!(modified.get(1).unwrap().deviation().unwrap(), 0.0);
 //! ```
 
+use std::cell::Cell;
+
+#[cfg(feature = "simd")]
+use wide::f64x4;
+
 // ========== Internal Implementation (Hidden from public API) ==========
 
 /// Internal trait for different variance calculation methods
@@ -125,6 +130,7 @@ struct ModifiedAllanMethod;
 
 impl ModifiedAllanMethod {
     /// Calculate the average over a tau interval
+    #[cfg(not(feature = "simd"))]
     fn average(&self, buffer: &[f64], start_idx: usize, tau: usize, buffer_len: usize) -> f64 {
         let mut sum = 0.0;
         for i in 0..tau {
@@ -132,6 +138,45 @@ impl ModifiedAllanMethod {
             sum += buffer[idx];
         }
         sum / tau as f64
+    }
+
+    /// SIMD-optimized average calculation
+    #[cfg(feature = "simd")]
+    fn average(&self, buffer: &[f64], start_idx: usize, tau: usize, buffer_len: usize) -> f64 {
+        // Check if we can avoid modulo operations (common case when buffer wraps less than once)
+        if start_idx + tau <= buffer_len {
+            // No wrapping needed - we can use direct slicing which is much faster
+            let slice = &buffer[start_idx..start_idx + tau];
+
+            // Process 4 elements at a time using SIMD
+            let mut sum_vec = f64x4::splat(0.0);
+            let chunks = slice.chunks_exact(4);
+            let remainder = chunks.remainder();
+
+            // Process chunks of 4 directly from the slice
+            for chunk in chunks {
+                let vals = f64x4::new([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                sum_vec += vals;
+            }
+
+            // Sum the vector elements
+            let mut sum = sum_vec.reduce_add();
+
+            // Handle remainder
+            for &val in remainder {
+                sum += val;
+            }
+
+            sum / tau as f64
+        } else {
+            // Wrapping case - fall back to modulo
+            let mut sum = 0.0;
+            for i in 0..tau {
+                let idx = (start_idx + i) % buffer_len;
+                sum += buffer[idx];
+            }
+            sum / tau as f64
+        }
     }
 }
 
@@ -238,6 +283,7 @@ impl<M: VarianceMethod> Variance<M> {
         }
     }
 
+    #[cfg(not(feature = "simd"))]
     fn update_incremental_growing(&mut self) {
         // Buffer is growing - just add new calculations
         for tau in &mut self.taus {
@@ -246,8 +292,6 @@ impl<M: VarianceMethod> Variance<M> {
 
             if self.len < min_samples {
                 // Still not enough samples
-                tau.variance = None;
-                tau.deviation = None;
                 continue;
             }
 
@@ -257,10 +301,31 @@ impl<M: VarianceMethod> Variance<M> {
 
             tau.sum += squared_diff;
             tau.count += 1;
+            // Invalidate cached values since sum changed
+            tau.variance.set(None);
+            tau.deviation.set(None);
+        }
+    }
 
-            let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
-            tau.variance = Some(variance);
-            tau.deviation = Some(variance.sqrt());
+    #[cfg(feature = "simd")]
+    fn update_incremental_growing(&mut self) {
+        // SIMD version: Process multiple tau values together when possible
+        let newest_idx = self.len - 1;
+
+        // Process tau values one by one (SIMD benefit mainly in ModifiedAllan averaging)
+        for tau in &mut self.taus {
+            let t = tau.tau as usize;
+            let min_samples = self.method.min_samples(t);
+
+            if self.len < min_samples {
+                continue;
+            }
+
+            let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
+            tau.sum += squared_diff;
+            tau.count += 1;
+            tau.variance.set(None);
+            tau.deviation.set(None);
         }
     }
 
@@ -278,10 +343,9 @@ impl<M: VarianceMethod> Variance<M> {
             // In cumulative mode, we keep adding without removing
             tau.sum += new_squared_diff;
             tau.count += 1;
-
-            let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
-            tau.variance = Some(variance);
-            tau.deviation = Some(variance.sqrt());
+            // Invalidate cached values since sum changed
+            tau.variance.set(None);
+            tau.deviation.set(None);
         }
     }
 
@@ -314,21 +378,42 @@ impl<M: VarianceMethod> Variance<M> {
             // Update the sum
             tau.sum = tau.sum - old_squared_diff + new_squared_diff;
             // Count stays the same when sliding
-
-            if tau.count > 0 {
-                let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
-                tau.variance = Some(variance);
-                tau.deviation = Some(variance.sqrt());
-            }
+            // Invalidate cached values since sum changed
+            tau.variance.set(None);
+            tau.deviation.set(None);
         }
     }
 
     fn get(&self, tau: usize) -> Option<&Tau> {
-        self.taus.iter().find(|t| t.tau == tau as u32)
+        let tau_data = self.taus.iter().find(|t| t.tau == tau as u32)?;
+
+        if tau_data.count == 0 {
+            return None;
+        }
+
+        // Compute lazily if not already computed
+        if tau_data.variance.get().is_none() {
+            let variance = tau_data.sum / self.method.divisor(tau_data.tau, tau_data.count);
+            let deviation = variance.sqrt();
+            tau_data.set_computed(variance, deviation);
+        }
+
+        Some(tau_data)
     }
 
     fn iter(&self) -> impl Iterator<Item = &Tau> {
-        self.taus.iter()
+        self.taus.iter().filter(move |tau_data| {
+            if tau_data.count == 0 {
+                return false;
+            }
+            // Compute lazily if not already computed
+            if tau_data.variance.get().is_none() {
+                let variance = tau_data.sum / self.method.divisor(tau_data.tau, tau_data.count);
+                let deviation = variance.sqrt();
+                tau_data.set_computed(variance, deviation);
+            }
+            true
+        })
     }
 
     fn samples(&self) -> usize {
@@ -347,8 +432,8 @@ pub struct Tau {
     tau: u32,
     sum: f64,
     count: u64,
-    variance: Option<f64>,
-    deviation: Option<f64>,
+    variance: Cell<Option<f64>>,
+    deviation: Cell<Option<f64>>,
 }
 
 impl Tau {
@@ -357,8 +442,8 @@ impl Tau {
             tau,
             sum: 0.0,
             count: 0,
-            variance: None,
-            deviation: None,
+            variance: Cell::new(None),
+            deviation: Cell::new(None),
         }
     }
 
@@ -367,11 +452,17 @@ impl Tau {
     }
 
     pub fn variance(&self) -> Option<f64> {
-        self.variance
+        self.variance.get()
     }
 
     pub fn deviation(&self) -> Option<f64> {
-        self.deviation
+        self.deviation.get()
+    }
+
+    /// Internal method to set computed values
+    fn set_computed(&self, variance: f64, deviation: f64) {
+        self.variance.set(Some(variance));
+        self.deviation.set(Some(deviation));
     }
 }
 

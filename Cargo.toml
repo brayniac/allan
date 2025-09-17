@@ -16,6 +16,19 @@ readme = "README.md"
 
 keywords = [ "stability", "allan", "deviation", "variance" ]
 
+[[bench]]
+name = "simd_bench"
+harness = false
+
+[dependencies]
+# Optional SIMD support via wide crate (works on stable)
+wide = { version = "0.7", optional = true }
+
+[features]
+default = []
+# Enable SIMD optimizations
+simd = ["wide"]
+
 [dev-dependencies]
 probability = "0.15.8"
 rand = "0.3.16"
