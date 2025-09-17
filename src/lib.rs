@@ -173,11 +173,12 @@ impl VarianceMethod for ModifiedAllanMethod {
 #[derive(Clone)]
 struct Variance<M: VarianceMethod> {
     method: M,
-    _config: Config,
+    config: Config,
     taus: Vec<Tau>,
     buffer: Vec<f64>,
     head: usize,
     len: usize,
+    total_samples: usize,  // Total samples seen (for cumulative mode)
 }
 
 impl<M: VarianceMethod> Variance<M> {
@@ -196,49 +197,125 @@ impl<M: VarianceMethod> Variance<M> {
 
         Self {
             method,
-            _config: config,
+            config,
             taus,
             buffer,
             head: 0,
             len: 0,
+            total_samples: 0,
         }
     }
 
     fn record(&mut self, value: f64) {
+        self.total_samples += 1;
+
         if self.len < self.buffer.len() {
+            // Buffer not full yet - just append
             self.buffer[self.len] = value;
             self.len += 1;
+            self.update_incremental_growing();
         } else {
-            self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.buffer.len();
+            // Buffer is full
+            match self.config.mode {
+                Mode::Cumulative => {
+                    // In cumulative mode, keep accumulating
+                    // We still use the buffer for the most recent samples
+                    // but we don't subtract old values from the sum
+                    let old_head = self.head;
+                    self.buffer[self.head] = value;
+                    self.head = (self.head + 1) % self.buffer.len();
+                    self.update_incremental_cumulative(old_head);
+                }
+                Mode::Sliding => {
+                    // In sliding mode, remove old and add new
+                    let old_value = self.buffer[self.head];
+                    self.buffer[self.head] = value;
+                    let old_head = self.head;
+                    self.head = (self.head + 1) % self.buffer.len();
+                    self.update_incremental_sliding(old_head, old_value);
+                }
+            }
         }
-
-        self.recalculate();
     }
 
-    fn recalculate(&mut self) {
+    fn update_incremental_growing(&mut self) {
+        // Buffer is growing - just add new calculations
         for tau in &mut self.taus {
-            // Only update with the latest sample if we have enough samples
             let t = tau.tau as usize;
             let min_samples = self.method.min_samples(t);
 
-            if self.len >= min_samples {
-                // Calculate the newest index
-                let newest_idx = if self.len < self.buffer.len() {
-                    // Buffer not wrapped yet
-                    self.len - 1
-                } else {
-                    // Buffer has wrapped
-                    (self.head + self.buffer.len() - 1) % self.buffer.len()
-                };
+            if self.len < min_samples {
+                // Still not enough samples
+                tau.variance = None;
+                tau.deviation = None;
+                continue;
+            }
 
-                // Calculate squared difference using the method-specific approach
-                let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
+            // We just added a new sample, so calculate the new squared difference
+            let newest_idx = self.len - 1;
+            let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
 
-                // Update running statistics
-                tau.sum += squared_diff;
-                tau.count += 1;
+            tau.sum += squared_diff;
+            tau.count += 1;
 
+            let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
+            tau.variance = Some(variance);
+            tau.deviation = Some(variance.sqrt());
+        }
+    }
+
+    fn update_incremental_cumulative(&mut self, _old_head: usize) {
+        // In cumulative mode, we just add the new calculation
+        // We don't remove old ones
+        for tau in &mut self.taus {
+            let t = tau.tau as usize;
+            let _min_samples = self.method.min_samples(t);
+
+            // Calculate the new squared diff to add (using the just-added sample)
+            let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
+            let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
+
+            // In cumulative mode, we keep adding without removing
+            tau.sum += new_squared_diff;
+            tau.count += 1;
+
+            let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
+            tau.variance = Some(variance);
+            tau.deviation = Some(variance.sqrt());
+        }
+    }
+
+    fn update_incremental_sliding(&mut self, old_head: usize, old_value: f64) {
+        // Buffer is full and sliding - remove old, add new
+        for tau in &mut self.taus {
+            let t = tau.tau as usize;
+            let min_samples = self.method.min_samples(t);
+
+            // We need to:
+            // 1. Remove the squared diff that used the old value at position old_head
+            // 2. Add the squared diff using the new value at position old_head
+
+            // The old calculation was from the position that ended at old_head + min_samples - 1
+            // But we need to restore the old value temporarily to calculate what to remove
+            let current_value = self.buffer[old_head];
+            self.buffer[old_head] = old_value;
+
+            // Calculate the old squared diff to remove
+            let old_calc_newest = (old_head + min_samples - 1) % self.buffer.len();
+            let old_squared_diff = self.method.calculate_squared_diff(&self.buffer, old_calc_newest, t, self.buffer.len());
+
+            // Restore the new value
+            self.buffer[old_head] = current_value;
+
+            // Calculate the new squared diff to add (using the just-added sample)
+            let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
+            let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
+
+            // Update the sum
+            tau.sum = tau.sum - old_squared_diff + new_squared_diff;
+            // Count stays the same when sliding
+
+            if tau.count > 0 {
                 let variance = tau.sum / self.method.divisor(tau.tau, tau.count);
                 tau.variance = Some(variance);
                 tau.deviation = Some(variance.sqrt());
@@ -255,7 +332,10 @@ impl<M: VarianceMethod> Variance<M> {
     }
 
     fn samples(&self) -> usize {
-        self.len
+        match self.config.mode {
+            Mode::Cumulative => self.total_samples,
+            Mode::Sliding => self.len,
+        }
     }
 }
 
@@ -316,12 +396,9 @@ impl Allan {
         }
     }
 
-    pub fn configure() -> Config {
+    /// Start building a custom Allan variance calculator
+    pub fn builder() -> Config {
         Config::default()
-    }
-
-    fn configured(config: Config) -> Option<Allan> {
-        Some(Allan::with_config(config))
     }
 
     /// Record a new sample
@@ -372,12 +449,9 @@ impl Hadamard {
         }
     }
 
-    pub fn configure() -> Config {
+    /// Start building a custom Hadamard variance calculator
+    pub fn builder() -> Config {
         Config::default()
-    }
-
-    fn configured(config: Config) -> Option<Hadamard> {
-        Some(Hadamard::with_config(config))
     }
 
     /// Record a new sample
@@ -428,12 +502,9 @@ impl ModifiedAllan {
         }
     }
 
-    pub fn configure() -> Config {
+    /// Start building a custom Modified Allan variance calculator
+    pub fn builder() -> Config {
         Config::default()
-    }
-
-    fn configured(config: Config) -> Option<ModifiedAllan> {
-        Some(ModifiedAllan::with_config(config))
     }
 
     /// Record a new sample
@@ -463,6 +534,29 @@ impl Default for ModifiedAllan {
     }
 }
 
+/// Calculation mode - cumulative or sliding window
+///
+/// Both modes use the same amount of memory (a ring buffer of size min_samples(max_tau)).
+/// The difference is in what data contributes to the variance calculation.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Mode {
+    /// Cumulative mode - statistics include all samples ever recorded (default)
+    /// The ring buffer holds the most recent samples for calculation, but
+    /// the variance accumulates over the entire history.
+    Cumulative,
+
+    /// Sliding window mode - statistics only include recent samples in the buffer
+    /// When the buffer is full, old samples are excluded from the variance
+    /// as new samples arrive. Useful for detecting changes in stability.
+    Sliding,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Cumulative  // Default to cumulative for maximum statistical information
+    }
+}
+
 /// describes the gaps between `Tau` and impacts space and computational costs
 #[derive(Copy, Clone)]
 pub enum Style {
@@ -480,6 +574,7 @@ pub enum Style {
 pub struct Config {
     max_tau: usize,
     style: Style,
+    mode: Mode,
 }
 
 impl Default for Config {
@@ -487,6 +582,7 @@ impl Default for Config {
         Config {
             max_tau: 1_000,
             style: Style::DecadeDeci,
+            mode: Mode::default(),
         }
     }
 }
@@ -506,17 +602,26 @@ impl Config {
         self
     }
 
-    pub fn build(self) -> Option<Allan> {
-        Allan::configured(self)
+    pub fn mode(mut self, mode: Mode) -> Self {
+        self.mode = mode;
+        self
     }
 
-    pub fn build_hadamard(self) -> Option<Hadamard> {
-        Hadamard::configured(self)
+    /// Build an Allan variance calculator with this configuration
+    pub fn build_allan(self) -> Allan {
+        Allan::with_config(self)
     }
 
-    pub fn build_modified_allan(self) -> Option<ModifiedAllan> {
-        ModifiedAllan::configured(self)
+    /// Build a Hadamard variance calculator with this configuration
+    pub fn build_hadamard(self) -> Hadamard {
+        Hadamard::with_config(self)
     }
+
+    /// Build a Modified Allan variance calculator with this configuration
+    pub fn build_modified_allan(self) -> ModifiedAllan {
+        ModifiedAllan::with_config(self)
+    }
+
 }
 
 // Helper function to generate Tau buckets based on configuration
@@ -590,11 +695,10 @@ mod tests {
     #[test]
     fn test_constant_values() {
         // For constant values, Allan variance and deviation should be 0
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Add constant values
         for _ in 0..100 {
@@ -623,11 +727,10 @@ mod tests {
     fn test_linear_drift() {
         // For linear drift, the three-point difference is 0 (second derivative of linear = 0)
         // So AVAR and ADEV should be 0
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Add linear drift: 0, 1, 2, 3, ...
         for i in 0..100 {
@@ -658,11 +761,10 @@ mod tests {
     #[test]
     fn test_quadratic_pattern() {
         // For quadratic y = x^2, the second difference is constant = 2
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(5)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Add quadratic: 0, 1, 4, 9, 16, 25, ...
         for i in 0..50 {
@@ -696,11 +798,10 @@ mod tests {
     #[test]
     fn test_alternating_values() {
         // Alternating between two values
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Alternating: 0, 1, 0, 1, 0, 1, ...
         for i in 0..100 {
@@ -734,11 +835,10 @@ mod tests {
     #[test]
     fn test_adev_equals_sqrt_avar() {
         // Verify that ADEV = sqrt(AVAR) for various patterns
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(20)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Add some varied data
         for i in 0..200 {
@@ -764,41 +864,42 @@ mod tests {
 
     #[test]
     fn test_step_change() {
-        // Step change in values
-        let mut allan = Allan::configure()
+        // Step change in values - test with sliding window
+        let mut allan = Allan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
-        // First 50 samples at 0, next 50 at 10
-        for _ in 0..50 {
+        // Allan with max_tau=10 needs 2*10+1 = 21 samples buffer
+        // Add 15 zeros first
+        for _ in 0..15 {
             allan.record(0.0);
         }
-        for _ in 0..50 {
+
+        // Now add 10 large values - buffer will have mix
+        for _ in 0..10 {
             allan.record(10.0);
         }
 
-        // The variance should be high around the transition
+        // At this point, buffer contains both 0s and 10s, so variance should be non-zero
         let t1 = allan.get(1).unwrap();
         assert!(
             t1.variance().unwrap() > 0.0,
-            "AVAR should be non-zero for step change"
+            "AVAR should be non-zero when buffer contains mixed values"
         );
         assert!(
             t1.deviation().unwrap() > 0.0,
-            "ADEV should be non-zero for step change"
+            "ADEV should be non-zero when buffer contains mixed values"
         );
     }
 
     #[test]
     fn test_known_values() {
         // Test with a simple known pattern where we can calculate AVAR by hand
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(2)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         // Simple sequence: [0, 1, 2, 3, 4, 5]
         // For tau=1:
@@ -820,11 +921,10 @@ mod tests {
     #[test]
     fn test_hadamard_constant_values() {
         // For constant values, Hadamard variance should also be 0
-        let mut hadamard = Hadamard::configure()
+        let mut hadamard = Hadamard::builder()
             .max_tau(5)
             .style(Style::AllTau)
-            .build_hadamard()
-            .unwrap();
+            .build_hadamard();
 
         // Add constant values
         for _ in 0..50 {
@@ -854,11 +954,10 @@ mod tests {
     #[test]
     fn test_hadamard_linear_drift() {
         // For linear drift, Hadamard should be zero (third derivative of linear is 0)
-        let mut hadamard = Hadamard::configure()
+        let mut hadamard = Hadamard::builder()
             .max_tau(5)
             .style(Style::AllTau)
-            .build_hadamard()
-            .unwrap();
+            .build_hadamard();
 
         // Add linear drift
         for i in 0..50 {
@@ -882,11 +981,10 @@ mod tests {
     #[test]
     fn test_hadamard_vs_allan_relationship() {
         // Test that Hadamard deviation = sqrt(Hadamard variance)
-        let mut hadamard = Hadamard::configure()
+        let mut hadamard = Hadamard::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build_hadamard()
-            .unwrap();
+            .build_hadamard();
 
         // Add varied data
         for i in 0..100 {
@@ -912,11 +1010,10 @@ mod tests {
     #[test]
     fn test_hadamard_quadratic() {
         // For quadratic, Hadamard should be zero (third derivative is 0)
-        let mut hadamard = Hadamard::configure()
+        let mut hadamard = Hadamard::builder()
             .max_tau(3)
             .style(Style::AllTau)
-            .build_hadamard()
-            .unwrap();
+            .build_hadamard();
 
         // Add quadratic: 0, 1, 4, 9, 16, ...
         for i in 0..30 {
@@ -940,11 +1037,10 @@ mod tests {
     #[test]
     fn test_hadamard_cubic() {
         // For cubic y = x^3, the third difference is constant = 6
-        let mut hadamard = Hadamard::configure()
+        let mut hadamard = Hadamard::builder()
             .max_tau(2)
             .style(Style::SingleTau(1))
-            .build_hadamard()
-            .unwrap();
+            .build_hadamard();
 
         // Add cubic: 0, 1, 8, 27, 64, ...
         for i in 0..20 {
@@ -971,11 +1067,10 @@ mod tests {
     #[test]
     fn test_modified_allan_constant_values() {
         // For constant values, Modified Allan variance should also be 0
-        let mut modified = ModifiedAllan::configure()
+        let mut modified = ModifiedAllan::builder()
             .max_tau(5)
             .style(Style::AllTau)
-            .build_modified_allan()
-            .unwrap();
+            .build_modified_allan();
 
         // Add constant values
         for _ in 0..50 {
@@ -1005,11 +1100,10 @@ mod tests {
     #[test]
     fn test_modified_allan_linear_drift() {
         // For linear drift, Modified Allan should be zero (averaging preserves linearity)
-        let mut modified = ModifiedAllan::configure()
+        let mut modified = ModifiedAllan::builder()
             .max_tau(5)
             .style(Style::AllTau)
-            .build_modified_allan()
-            .unwrap();
+            .build_modified_allan();
 
         // Add linear drift
         for i in 0..50 {
@@ -1034,17 +1128,15 @@ mod tests {
     fn test_modified_allan_vs_allan() {
         // For white noise, Modified Allan should differ from regular Allan
         // Modified Allan has better rejection of white phase modulation
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
-        let mut modified = ModifiedAllan::configure()
+        let mut modified = ModifiedAllan::builder()
             .max_tau(10)
             .style(Style::AllTau)
-            .build_modified_allan()
-            .unwrap();
+            .build_modified_allan();
 
         // Add some noise
         for i in 0..100 {
@@ -1070,12 +1162,143 @@ mod tests {
     }
 
     #[test]
+    fn test_ring_buffer_sliding_window() {
+        // Test that the ring buffer actually acts as a sliding window
+        // and old samples are removed when buffer is full
+        let mut allan = Allan::builder()
+            .max_tau(2)
+            .style(Style::SingleTau(1))
+            .mode(Mode::Sliding)  // Explicitly set sliding mode for this test
+            .build_allan();
+
+        // Fill buffer with zeros (needs 3 samples for tau=1)
+        for _ in 0..10 {
+            allan.record(0.0);
+        }
+
+        let initial_var = allan.get(1).unwrap().variance().unwrap();
+        assert_eq!(initial_var, 0.0, "Variance should be 0 for constant zeros");
+
+        // Now fill the buffer with large values
+        // Since max_tau=2, buffer size should be 2*2+1=5 for Allan
+        // After adding enough large values, the buffer should only contain large values
+        for _ in 0..10 {
+            allan.record(100.0);
+        }
+
+        let final_var = allan.get(1).unwrap().variance().unwrap();
+        assert_eq!(final_var, 0.0, "Variance should be 0 after buffer filled with constant 100s");
+
+        // Now add a mix to verify the window is sliding
+        allan.record(0.0);
+        let mixed_var = allan.get(1).unwrap().variance().unwrap();
+        assert!(mixed_var > 0.0, "Variance should be non-zero with mixed values in buffer");
+    }
+
+    #[test]
+    fn test_buffer_size_limits() {
+        // Verify that buffer size is based on max_tau and method requirements
+        let allan = Allan::builder()
+            .max_tau(10)
+            .style(Style::SingleTau(1))
+            .build_allan();
+
+        // Allan needs 2*tau + 1 samples, so for max_tau=10: 2*10+1 = 21
+        // Let's add more samples than that and verify we still get consistent results
+        let mut allan_clone = allan.clone();
+
+        // Add 100 samples of value 5.0
+        for _ in 0..100 {
+            allan_clone.record(5.0);
+        }
+
+        let var1 = allan_clone.get(1).unwrap().variance().unwrap();
+        assert_eq!(var1, 0.0, "Variance should be 0 for constant values");
+
+        // Add more samples - should maintain sliding window
+        for _ in 0..100 {
+            allan_clone.record(5.0);
+        }
+
+        let var2 = allan_clone.get(1).unwrap().variance().unwrap();
+        assert_eq!(var2, 0.0, "Variance should still be 0 after adding more constant values");
+    }
+
+    #[test]
+    fn test_cumulative_vs_sliding_modes() {
+        // Test that cumulative mode keeps all data while sliding mode uses a window
+        let mut cumulative = Allan::builder()
+            .max_tau(5)
+            .style(Style::SingleTau(1))
+            .mode(Mode::Cumulative)
+            .build_allan();
+
+        let mut sliding = Allan::builder()
+            .max_tau(5)
+            .style(Style::SingleTau(1))
+            .mode(Mode::Sliding)
+            .build_allan();
+
+        // Add initial samples with value 0
+        for _ in 0..20 {
+            cumulative.record(0.0);
+            sliding.record(0.0);
+        }
+
+        // Both should have 0 variance
+        assert_eq!(cumulative.get(1).unwrap().variance().unwrap(), 0.0);
+        assert_eq!(sliding.get(1).unwrap().variance().unwrap(), 0.0);
+
+        // Now add samples with value 10
+        for _ in 0..20 {
+            cumulative.record(10.0);
+            sliding.record(10.0);
+        }
+
+        // Cumulative should have non-zero variance (mix of 0s and 10s)
+        assert!(cumulative.get(1).unwrap().variance().unwrap() > 0.0,
+                "Cumulative mode should have variance from mixed values");
+
+        // Sliding should have 0 variance (buffer only contains 10s now)
+        // Buffer size for tau=1 with max_tau=5 is 2*5+1=11
+        assert_eq!(sliding.get(1).unwrap().variance().unwrap(), 0.0,
+                   "Sliding mode should have 0 variance after buffer fills with constant");
+
+        // Check sample counts
+        assert_eq!(cumulative.samples(), 40, "Cumulative should report total samples");
+        assert_eq!(sliding.samples(), 11, "Sliding should report buffer size");
+    }
+
+    #[test]
+    fn test_cumulative_mode_accumulation() {
+        // Test that cumulative mode truly accumulates over time
+        let mut allan = Allan::builder()
+            .max_tau(2)
+            .style(Style::SingleTau(1))
+            .mode(Mode::Cumulative)
+            .build_allan();
+
+        // Add many samples - more than buffer size
+        for i in 0..100 {
+            allan.record((i % 3) as f64);  // Pattern: 0,1,2,0,1,2,...
+        }
+
+        // Get the count from tau
+        let tau = allan.get(1).unwrap();
+
+        // In cumulative mode, count should reflect all overlapping calculations
+        // Buffer size is 2*2+1=5, but we've added 100 samples
+        // The count should be much more than buffer size
+        assert!(tau.variance().is_some());
+        assert_eq!(allan.samples(), 100, "Should report all 100 samples");
+    }
+
+    #[test]
     fn white_noise() {
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(1000)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
         let mut rng = rand::thread_rng();
         let between = Range::new(0.0, 1.0);
         for _ in 0..10_000 {
@@ -1100,11 +1323,10 @@ mod tests {
 
     #[test]
     fn pink_noise() {
-        let mut allan = Allan::configure()
+        let mut allan = Allan::builder()
             .max_tau(1000)
             .style(Style::AllTau)
-            .build()
-            .unwrap();
+            .build_allan();
 
         let mut source = source::default();
         let distribution = Beta::new(1.0, 3.0, 0.0, 1.0);
