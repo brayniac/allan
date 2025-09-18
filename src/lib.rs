@@ -95,6 +95,7 @@ impl VarianceMethod for AllanMethod {
         2 * tau + 1
     }
 
+    #[inline(always)]
     fn calculate_diff(&self, buffer: &[f64], idx0: usize, idx1: usize, idx2: usize, _idx3: Option<usize>) -> f64 {
         buffer[idx2] - 2.0 * buffer[idx1] + buffer[idx0]
     }
@@ -113,6 +114,7 @@ impl VarianceMethod for HadamardMethod {
         3 * tau + 1
     }
 
+    #[inline(always)]
     fn calculate_diff(&self, buffer: &[f64], idx0: usize, idx1: usize, idx2: usize, idx3: Option<usize>) -> f64 {
         let idx3 = idx3.expect("Hadamard requires 4 points");
         buffer[idx3] - 3.0 * buffer[idx2] + 3.0 * buffer[idx1] - buffer[idx0]
@@ -238,7 +240,7 @@ impl<M: VarianceMethod> Variance<M> {
         let mut buffer = Vec::with_capacity(samples);
         buffer.resize(samples, 0.0);
 
-        let taus = generate_taus(&config);
+        let taus = generate_taus(&config, &method);
 
         Self {
             method,
@@ -286,24 +288,23 @@ impl<M: VarianceMethod> Variance<M> {
     #[cfg(not(feature = "simd"))]
     fn update_incremental_growing(&mut self) {
         // Buffer is growing - just add new calculations
+        let current_len = self.len;  // Cache for better performance
         for tau in &mut self.taus {
             let t = tau.tau as usize;
             let min_samples = self.method.min_samples(t);
 
-            if self.len < min_samples {
-                // Still not enough samples
-                continue;
+            // Most likely path first (buffer has enough samples)
+            if current_len >= min_samples {
+                // We just added a new sample, so calculate the new squared difference
+                let newest_idx = self.len - 1;
+                let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
+
+                tau.sum += squared_diff;
+                tau.count += 1;
+                // Invalidate cached values since sum changed
+                tau.variance.set(None);
+                tau.deviation.set(None);
             }
-
-            // We just added a new sample, so calculate the new squared difference
-            let newest_idx = self.len - 1;
-            let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
-
-            tau.sum += squared_diff;
-            tau.count += 1;
-            // Invalidate cached values since sum changed
-            tau.variance.set(None);
-            tau.deviation.set(None);
         }
     }
 
@@ -311,21 +312,21 @@ impl<M: VarianceMethod> Variance<M> {
     fn update_incremental_growing(&mut self) {
         // SIMD version: Process multiple tau values together when possible
         let newest_idx = self.len - 1;
+        let current_len = self.len;
 
         // Process tau values one by one (SIMD benefit mainly in ModifiedAllan averaging)
         for tau in &mut self.taus {
             let t = tau.tau as usize;
             let min_samples = self.method.min_samples(t);
 
-            if self.len < min_samples {
-                continue;
+            // Most likely path first
+            if current_len >= min_samples {
+                let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
+                tau.sum += squared_diff;
+                tau.count += 1;
+                tau.variance.set(None);
+                tau.deviation.set(None);
             }
-
-            let squared_diff = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
-            tau.sum += squared_diff;
-            tau.count += 1;
-            tau.variance.set(None);
-            tau.deviation.set(None);
         }
     }
 
@@ -355,21 +356,41 @@ impl<M: VarianceMethod> Variance<M> {
             let t = tau.tau as usize;
             let min_samples = self.method.min_samples(t);
 
-            // We need to:
-            // 1. Remove the squared diff that used the old value at position old_head
-            // 2. Add the squared diff using the new value at position old_head
-
-            // The old calculation was from the position that ended at old_head + min_samples - 1
-            // But we need to restore the old value temporarily to calculate what to remove
-            let current_value = self.buffer[old_head];
-            self.buffer[old_head] = old_value;
-
-            // Calculate the old squared diff to remove
+            // Calculate indices for the old squared diff that needs to be removed
+            // This was calculated when the old_value was the newest in its calculation window
             let old_calc_newest = (old_head + min_samples - 1) % self.buffer.len();
-            let old_squared_diff = self.method.calculate_squared_diff(&self.buffer, old_calc_newest, t, self.buffer.len());
 
-            // Restore the new value
-            self.buffer[old_head] = current_value;
+            // Calculate the old squared diff without mutating the buffer
+            // We need to check if old_head participates in this calculation
+            let old_squared_diff = {
+                let indices = self.method.get_indices(old_calc_newest, t, self.buffer.len());
+
+                // Check if old_head is one of the indices used in the calculation
+                let uses_old_head = indices.0 == old_head || indices.1 == old_head
+                    || indices.2 == old_head || indices.3 == Some(old_head);
+
+                if uses_old_head {
+                    // Calculate with the old value substituted
+                    // Create a temporary array with the values we need
+                    let val0 = if indices.0 == old_head { old_value } else { self.buffer[indices.0] };
+                    let val1 = if indices.1 == old_head { old_value } else { self.buffer[indices.1] };
+                    let val2 = if indices.2 == old_head { old_value } else { self.buffer[indices.2] };
+
+                    let diff = if let Some(idx3) = indices.3 {
+                        let val3 = if idx3 == old_head { old_value } else { self.buffer[idx3] };
+                        // Use the method's calculate_diff directly with the values
+                        let temp_buf = [val0, val1, val2, val3];
+                        self.method.calculate_diff(&temp_buf, 0, 1, 2, Some(3))
+                    } else {
+                        let temp_buf = [val0, val1, val2];
+                        self.method.calculate_diff(&temp_buf, 0, 1, 2, None)
+                    };
+                    diff * diff
+                } else {
+                    // old_head is not in this calculation, use current buffer values
+                    self.method.calculate_squared_diff(&self.buffer, old_calc_newest, t, self.buffer.len())
+                }
+            };
 
             // Calculate the new squared diff to add (using the just-added sample)
             let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
@@ -393,7 +414,7 @@ impl<M: VarianceMethod> Variance<M> {
 
         // Compute lazily if not already computed
         if tau_data.variance.get().is_none() {
-            let variance = tau_data.sum / self.method.divisor(tau_data.tau, tau_data.count);
+            let variance = tau_data.sum / (tau_data.divisor_factor * tau_data.count as f64);
             let deviation = variance.sqrt();
             tau_data.set_computed(variance, deviation);
         }
@@ -408,7 +429,7 @@ impl<M: VarianceMethod> Variance<M> {
             }
             // Compute lazily if not already computed
             if tau_data.variance.get().is_none() {
-                let variance = tau_data.sum / self.method.divisor(tau_data.tau, tau_data.count);
+                let variance = tau_data.sum / (tau_data.divisor_factor * tau_data.count as f64);
                 let deviation = variance.sqrt();
                 tau_data.set_computed(variance, deviation);
             }
@@ -432,16 +453,18 @@ pub struct Tau {
     tau: u32,
     sum: f64,
     count: u64,
+    divisor_factor: f64,  // Pre-computed constant part of divisor (2.0 * tau² or 6.0 * tau²)
     variance: Cell<Option<f64>>,
     deviation: Cell<Option<f64>>,
 }
 
 impl Tau {
-    fn new(tau: u32) -> Tau {
+    fn new(tau: u32, divisor_factor: f64) -> Tau {
         Tau {
             tau,
             sum: 0.0,
             count: 0,
+            divisor_factor,
             variance: Cell::new(None),
             deviation: Cell::new(None),
         }
@@ -716,31 +739,34 @@ impl Config {
 }
 
 // Helper function to generate Tau buckets based on configuration
-fn generate_taus(config: &Config) -> Vec<Tau> {
+fn generate_taus<M: VarianceMethod>(config: &Config, method: &M) -> Vec<Tau> {
     let mut taus = Vec::new();
 
     match config.style {
         Style::SingleTau(t) => {
-            taus.push(Tau::new(t));
+            // Pre-compute the divisor factor for this tau
+            let divisor_factor = method.divisor(t, 1) / 1.0;  // Get the constant part
+            taus.push(Tau::new(t, divisor_factor));
         }
         Style::AllTau => {
             for t in 1..=(config.max_tau as u32) {
-                taus.push(Tau::new(t));
+                let divisor_factor = method.divisor(t, 1) / 1.0;
+                taus.push(Tau::new(t, divisor_factor));
             }
         }
-        Style::Decade125 => taus = decade_tau(config.max_tau, &[1, 2, 5]),
-        Style::Decade124 => taus = decade_tau(config.max_tau, &[1, 2, 4]),
-        Style::Decade1248 => taus = decade_tau(config.max_tau, &[1, 2, 4, 8]),
+        Style::Decade125 => taus = decade_tau(config.max_tau, &[1, 2, 5], method),
+        Style::Decade124 => taus = decade_tau(config.max_tau, &[1, 2, 4], method),
+        Style::Decade1248 => taus = decade_tau(config.max_tau, &[1, 2, 4, 8], method),
         Style::DecadeDeci => {
-            taus = decade_tau(config.max_tau, &[1, 2, 3, 4, 5, 6, 7, 8, 9])
+            taus = decade_tau(config.max_tau, &[1, 2, 3, 4, 5, 6, 7, 8, 9], method)
         }
-        Style::Decade => taus = decade_tau(config.max_tau, &[1]),
+        Style::Decade => taus = decade_tau(config.max_tau, &[1], method),
     }
 
     taus
 }
 
-fn decade_tau(max: usize, steps: &[usize]) -> Vec<Tau> {
+fn decade_tau<M: VarianceMethod>(max: usize, steps: &[usize], method: &M) -> Vec<Tau> {
     let mut capacity = 0;
     let mut p = 0;
     loop {
@@ -766,7 +792,8 @@ fn decade_tau(max: usize, steps: &[usize]) -> Vec<Tau> {
         for &step in steps {
             let t = step * base;
             if t <= max {
-                taus.push(Tau::new(t as u32));
+                let divisor_factor = method.divisor(t as u32, 1) / 1.0;
+                taus.push(Tau::new(t as u32, divisor_factor));
             }
         }
         p += 1;
