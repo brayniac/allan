@@ -38,7 +38,6 @@
 //! assert_eq!(modified.get(1).unwrap().deviation().unwrap(), 0.0);
 //! ```
 
-use std::cell::Cell;
 
 #[cfg(feature = "simd")]
 use wide::f64x4;
@@ -403,11 +402,8 @@ impl<M: VarianceMethod> Variance<M> {
 
         Some(Tau {
             tau: self.tau_values[index],
-            sum: self.sums[index],
-            count: self.counts[index],
-            divisor_factor: self.divisor_factors[index],
-            variance: Cell::new(Some(variance)),
-            deviation: Cell::new(Some(deviation)),
+            variance,
+            deviation,
         })
     }
 
@@ -422,11 +418,8 @@ impl<M: VarianceMethod> Variance<M> {
 
             Some(Tau {
                 tau,
-                sum: self.sums[i],
-                count: self.counts[i],
-                divisor_factor: self.divisor_factors[i],
-                variance: Cell::new(Some(variance)),
-                deviation: Cell::new(Some(deviation)),
+                variance,
+                deviation,
             })
         })
     }
@@ -441,45 +434,25 @@ impl<M: VarianceMethod> Variance<M> {
 
 // ========== Public API ==========
 
-/// Generic tau bucket for variance calculations
-#[derive(Clone)]
+/// Result of a tau calculation with computed variance and deviation
+#[derive(Clone, Debug)]
 pub struct Tau {
     tau: u32,
-    sum: f64,
-    count: u64,
-    divisor_factor: f64,  // Pre-computed constant part of divisor (2.0 * tau² or 6.0 * tau²)
-    variance: Cell<Option<f64>>,
-    deviation: Cell<Option<f64>>,
+    variance: f64,
+    deviation: f64,
 }
 
 impl Tau {
-    fn new(tau: u32, divisor_factor: f64) -> Tau {
-        Tau {
-            tau,
-            sum: 0.0,
-            count: 0,
-            divisor_factor,
-            variance: Cell::new(None),
-            deviation: Cell::new(None),
-        }
-    }
-
     pub fn tau(&self) -> u32 {
         self.tau
     }
 
     pub fn variance(&self) -> Option<f64> {
-        self.variance.get()
+        Some(self.variance)
     }
 
     pub fn deviation(&self) -> Option<f64> {
-        self.deviation.get()
-    }
-
-    /// Internal method to set computed values
-    fn set_computed(&self, variance: f64, deviation: f64) {
-        self.variance.set(Some(variance));
-        self.deviation.set(Some(deviation));
+        Some(self.deviation)
     }
 }
 
