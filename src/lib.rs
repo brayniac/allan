@@ -633,8 +633,10 @@ impl<M: VarianceMethod> Variance<M> {
         })
     }
 
-    #[cfg(not(feature = "simd"))]
     fn iter(&self) -> impl Iterator<Item = Tau> + '_ {
+        // Simple non-allocating iterator
+        // Testing showed SIMD batch computation here was actually slower
+        // due to Vec allocation overhead, so we use simple iteration
         self.tau_values.iter().enumerate().filter_map(move |(i, &tau)| {
             if self.counts[i] == 0 {
                 return None;
@@ -649,86 +651,6 @@ impl<M: VarianceMethod> Variance<M> {
                 deviation,
             })
         })
-    }
-
-    #[cfg(feature = "simd")]
-    fn iter(&self) -> impl Iterator<Item = Tau> + '_ {
-        // Pre-compute variances in batches for better performance
-        let mut results = Vec::with_capacity(self.tau_values.len());
-        let num_taus = self.tau_values.len();
-
-        // Process in chunks of 4
-        let chunks = num_taus / 4;
-        let remainder_start = chunks * 4;
-
-        for chunk_idx in 0..chunks {
-            let base_idx = chunk_idx * 4;
-
-            // Check which ones are valid
-            let valid = [
-                self.counts[base_idx] > 0,
-                self.counts[base_idx + 1] > 0,
-                self.counts[base_idx + 2] > 0,
-                self.counts[base_idx + 3] > 0,
-            ];
-
-            if valid.iter().all(|&x| x) {
-                // All valid - compute with SIMD
-                let sums_vec = f64x4::new([
-                    self.sums[base_idx],
-                    self.sums[base_idx + 1],
-                    self.sums[base_idx + 2],
-                    self.sums[base_idx + 3],
-                ]);
-
-                let divisors_vec = f64x4::new([
-                    self.divisor_factors[base_idx] * self.counts[base_idx] as f64,
-                    self.divisor_factors[base_idx + 1] * self.counts[base_idx + 1] as f64,
-                    self.divisor_factors[base_idx + 2] * self.counts[base_idx + 2] as f64,
-                    self.divisor_factors[base_idx + 3] * self.counts[base_idx + 3] as f64,
-                ]);
-
-                let variances = sums_vec / divisors_vec;
-                let deviations = variances.sqrt();
-
-                for j in 0..4 {
-                    results.push(Tau {
-                        tau: self.tau_values[base_idx + j],
-                        variance: variances.as_array_ref()[j],
-                        deviation: deviations.as_array_ref()[j],
-                    });
-                }
-            } else {
-                // Process individually
-                for j in 0..4 {
-                    let i = base_idx + j;
-                    if valid[j] {
-                        let variance = self.sums[i] / (self.divisor_factors[i] * self.counts[i] as f64);
-                        let deviation = variance.sqrt();
-                        results.push(Tau {
-                            tau: self.tau_values[i],
-                            variance,
-                            deviation,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Process remainder
-        for i in remainder_start..num_taus {
-            if self.counts[i] > 0 {
-                let variance = self.sums[i] / (self.divisor_factors[i] * self.counts[i] as f64);
-                let deviation = variance.sqrt();
-                results.push(Tau {
-                    tau: self.tau_values[i],
-                    variance,
-                    deviation,
-                });
-            }
-        }
-
-        results.into_iter()
     }
 
     fn samples(&self) -> usize {
