@@ -634,11 +634,6 @@ impl<M: VarianceMethod> Variance<M> {
     }
 
     fn iter(&self) -> impl Iterator<Item = Tau> + '_ {
-        // Simple iterator without SIMD
-        // Testing showed SIMD batch iterator was 2-3x slower due to:
-        // 1. Batch management overhead
-        // 2. Branch prediction misses on batch refill
-        // 3. Most iterations don't have 4 consecutive valid tau values
         self.tau_values.iter().enumerate().filter_map(move |(i, &tau)| {
             if self.counts[i] == 0 {
                 return None;
@@ -666,7 +661,7 @@ impl<M: VarianceMethod> Variance<M> {
 // ========== Public API ==========
 
 /// Result of a tau calculation with computed variance and deviation
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Tau {
     tau: u32,
     variance: f64,
