@@ -25,8 +25,8 @@ harness = false
 wide = { version = "0.7", optional = true }
 
 [features]
-default = []
-# Enable SIMD optimizations
+default = ["simd"]
+# SIMD optimizations (enabled by default, disable with --no-default-features)
 simd = ["wide"]
 
 [dev-dependencies]

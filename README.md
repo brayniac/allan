@@ -16,6 +16,7 @@ This library provides:
 - Configurable tau (averaging time) ranges with multiple spacing options
 - Streaming calculation with efficient circular buffer implementation
 - Support for real-time analysis of continuous data streams
+- SIMD optimizations (enabled by default) for 3x faster Modified Allan calculations
 
 ## Example
 
