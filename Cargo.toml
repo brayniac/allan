@@ -24,6 +24,10 @@ harness = false
 name = "comprehensive_simd_bench"
 harness = false
 
+[[bench]]
+name = "sliding_bench"
+harness = false
+
 [dependencies]
 # Optional SIMD support via wide crate (works on stable)
 wide = { version = "0.7", optional = true }

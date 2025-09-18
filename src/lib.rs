@@ -58,6 +58,46 @@ trait VarianceMethod: Clone {
         diff * diff
     }
 
+    /// Calculate old squared diff with a substituted value (for sliding mode)
+    /// This is needed when the old value being removed is part of the calculation
+    fn calculate_old_squared_diff_with_substitution(
+        &self,
+        buffer: &[f64],
+        newest_idx: usize,
+        tau: usize,
+        buffer_len: usize,
+        old_head: usize,
+        old_value: f64
+    ) -> f64 {
+        // Default implementation for simple methods
+        let indices = self.get_indices(newest_idx, tau, buffer_len);
+
+        // Check if old_head is one of the indices used in the calculation
+        let uses_old_head = indices.0 == old_head || indices.1 == old_head
+            || indices.2 == old_head || indices.3 == Some(old_head);
+
+        if uses_old_head {
+            // Calculate with the old value substituted
+            let val0 = if indices.0 == old_head { old_value } else { buffer[indices.0] };
+            let val1 = if indices.1 == old_head { old_value } else { buffer[indices.1] };
+            let val2 = if indices.2 == old_head { old_value } else { buffer[indices.2] };
+
+            let diff = if let Some(idx3) = indices.3 {
+                let val3 = if idx3 == old_head { old_value } else { buffer[idx3] };
+                let temp_buf = [val0, val1, val2, val3];
+                self.calculate_diff(&temp_buf, 0, 1, 2, Some(3))
+            } else {
+                let temp_buf = [val0, val1, val2];
+                self.calculate_diff(&temp_buf, 0, 1, 2, None)
+            };
+
+            diff * diff
+        } else {
+            // old_head is not in this calculation, use current buffer values
+            self.calculate_squared_diff(buffer, newest_idx, tau, buffer_len)
+        }
+    }
+
     /// Get indices for the calculation (used by non-modified methods)
     fn get_indices(&self, newest_idx: usize, tau: usize, buffer_len: usize) -> (usize, usize, usize, Option<usize>) {
         let min_samples = self.min_samples(tau);
@@ -199,6 +239,41 @@ impl VarianceMethod for ModifiedAllanMethod {
         let avg0 = self.average(buffer, start0, tau, buffer_len);
         let avg1 = self.average(buffer, start1, tau, buffer_len);
         let avg2 = self.average(buffer, start2, tau, buffer_len);
+
+        // Second difference of the averages
+        let diff = avg2 - 2.0 * avg1 + avg0;
+        diff * diff
+    }
+
+    fn calculate_old_squared_diff_with_substitution(
+        &self,
+        buffer: &[f64],
+        newest_idx: usize,
+        tau: usize,
+        buffer_len: usize,
+        old_head: usize,
+        old_value: f64
+    ) -> f64 {
+        // For Modified Allan, we need to handle averaging specially
+        // Calculate start indices for the three tau intervals
+        let start2 = (newest_idx + buffer_len + 1 - tau) % buffer_len;
+        let start1 = (start2 + buffer_len - tau) % buffer_len;
+        let start0 = (start1 + buffer_len - tau) % buffer_len;
+
+        // Helper function to calculate average with substitution
+        let average_with_sub = |start_idx: usize| {
+            let mut sum = 0.0;
+            for i in 0..tau {
+                let idx = (start_idx + i) % buffer_len;
+                sum += if idx == old_head { old_value } else { buffer[idx] };
+            }
+            sum / tau as f64
+        };
+
+        // Calculate averages with old value substituted where needed
+        let avg0 = average_with_sub(start0);
+        let avg1 = average_with_sub(start1);
+        let avg2 = average_with_sub(start2);
 
         // Second difference of the averages
         let diff = avg2 - 2.0 * avg1 + avg0;
@@ -448,6 +523,7 @@ impl<M: VarianceMethod> Variance<M> {
         }
     }
 
+    #[cfg(not(feature = "simd"))]
     fn update_incremental_sliding(&mut self, old_head: usize, old_value: f64) {
         // Buffer is full and sliding - remove old, add new
         let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
@@ -460,38 +536,80 @@ impl<M: VarianceMethod> Variance<M> {
             let old_calc_newest = (old_head + min_samples - 1) % self.buffer.len();
 
             // Calculate the old squared diff without mutating the buffer
-            let old_squared_diff = {
-                let indices = self.method.get_indices(old_calc_newest, t, self.buffer.len());
-
-                // Check if old_head is one of the indices used in the calculation
-                let uses_old_head = indices.0 == old_head || indices.1 == old_head
-                    || indices.2 == old_head || indices.3 == Some(old_head);
-
-                if uses_old_head {
-                    // Calculate with the old value substituted
-                    let val0 = if indices.0 == old_head { old_value } else { self.buffer[indices.0] };
-                    let val1 = if indices.1 == old_head { old_value } else { self.buffer[indices.1] };
-                    let val2 = if indices.2 == old_head { old_value } else { self.buffer[indices.2] };
-
-                    let diff = if let Some(idx3) = indices.3 {
-                        let val3 = if idx3 == old_head { old_value } else { self.buffer[idx3] };
-                        let temp_buf = [val0, val1, val2, val3];
-                        self.method.calculate_diff(&temp_buf, 0, 1, 2, Some(3))
-                    } else {
-                        let temp_buf = [val0, val1, val2];
-                        self.method.calculate_diff(&temp_buf, 0, 1, 2, None)
-                    };
-                    diff * diff
-                } else {
-                    // old_head is not in this calculation, use current buffer values
-                    self.method.calculate_squared_diff(&self.buffer, old_calc_newest, t, self.buffer.len())
-                }
-            };
+            // We need to handle both simple methods and ModifiedAllan differently
+            let old_squared_diff = self.method.calculate_old_squared_diff_with_substitution(
+                &self.buffer, old_calc_newest, t, self.buffer.len(), old_head, old_value
+            );
 
             // Calculate the new squared diff to add
             let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
 
             // Update the sum (count stays the same when sliding)
+            self.sums[i] = self.sums[i] - old_squared_diff + new_squared_diff;
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    fn update_incremental_sliding(&mut self, old_head: usize, old_value: f64) {
+        // SIMD version for sliding mode
+        let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
+        let num_taus = self.tau_values.len();
+
+        // Process in chunks of 4
+        let chunks = num_taus / 4;
+        let remainder_start = chunks * 4;
+
+        for chunk_idx in 0..chunks {
+            let base_idx = chunk_idx * 4;
+
+            // Calculate old and new diffs for all 4 tau values
+            let mut old_diffs = [0.0; 4];
+            let mut new_diffs = [0.0; 4];
+
+            for j in 0..4 {
+                let i = base_idx + j;
+                let t = self.tau_values[i] as usize;
+                let min_samples = self.method.min_samples(t);
+
+                // Calculate old diff
+                let old_calc_newest = (old_head + min_samples - 1) % self.buffer.len();
+                old_diffs[j] = self.method.calculate_old_squared_diff_with_substitution(
+                    &self.buffer, old_calc_newest, t, self.buffer.len(), old_head, old_value
+                );
+
+                // Calculate new diff
+                new_diffs[j] = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
+            }
+
+            // Update sums using SIMD
+            let sums_vec = f64x4::new([
+                self.sums[base_idx],
+                self.sums[base_idx + 1],
+                self.sums[base_idx + 2],
+                self.sums[base_idx + 3],
+            ]);
+            let old_vec = f64x4::new(old_diffs);
+            let new_vec = f64x4::new(new_diffs);
+            let result = sums_vec - old_vec + new_vec;
+
+            self.sums[base_idx] = result.as_array_ref()[0];
+            self.sums[base_idx + 1] = result.as_array_ref()[1];
+            self.sums[base_idx + 2] = result.as_array_ref()[2];
+            self.sums[base_idx + 3] = result.as_array_ref()[3];
+        }
+
+        // Process remainder
+        for i in remainder_start..num_taus {
+            let t = self.tau_values[i] as usize;
+            let min_samples = self.method.min_samples(t);
+
+            // Calculate old diff
+            let old_calc_newest = (old_head + min_samples - 1) % self.buffer.len();
+            let old_squared_diff = self.method.calculate_old_squared_diff_with_substitution(
+                &self.buffer, old_calc_newest, t, self.buffer.len(), old_head, old_value
+            );
+
+            let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
             self.sums[i] = self.sums[i] - old_squared_diff + new_squared_diff;
         }
     }

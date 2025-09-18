@@ -12,7 +12,8 @@
       "Bash(sed:*)",
       "Bash(cargo run:*)",
       "Bash(cargo bench:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(./target/release/deps/sliding_bench-6380afca2a2defa5)"
     ],
     "deny": [],
     "ask": []
