@@ -312,12 +312,68 @@ impl<M: VarianceMethod> Variance<M> {
 
     #[cfg(feature = "simd")]
     fn update_incremental_growing(&mut self) {
-        // SIMD version: Process multiple tau values together when possible
+        // SIMD version: Process multiple tau values in batches
         let newest_idx = self.len - 1;
         let current_len = self.len;
+        let num_taus = self.tau_values.len();
 
-        for (i, &tau) in self.tau_values.iter().enumerate() {
-            let t = tau as usize;
+        // Process 4 tau values at a time where possible
+        let chunks = num_taus / 4;
+        let remainder_start = chunks * 4;
+
+        // Process chunks of 4 with SIMD
+        for chunk_idx in 0..chunks {
+            let base_idx = chunk_idx * 4;
+
+            // Check if all 4 taus have enough samples
+            let mut can_process = [false; 4];
+            let mut diffs = [0.0; 4];
+
+            for j in 0..4 {
+                let i = base_idx + j;
+                let t = self.tau_values[i] as usize;
+                let min_samples = self.method.min_samples(t);
+                can_process[j] = current_len >= min_samples;
+                if can_process[j] {
+                    diffs[j] = self.method.calculate_squared_diff(&self.buffer, newest_idx, t, self.buffer.len());
+                }
+            }
+
+            // Update sums and counts using SIMD
+            if can_process.iter().all(|&x| x) {
+                // All 4 can be processed - use SIMD
+                let sums_vec = f64x4::new([
+                    self.sums[base_idx],
+                    self.sums[base_idx + 1],
+                    self.sums[base_idx + 2],
+                    self.sums[base_idx + 3],
+                ]);
+                let diffs_vec = f64x4::new(diffs);
+                let result = sums_vec + diffs_vec;
+
+                self.sums[base_idx] = result.as_array_ref()[0];
+                self.sums[base_idx + 1] = result.as_array_ref()[1];
+                self.sums[base_idx + 2] = result.as_array_ref()[2];
+                self.sums[base_idx + 3] = result.as_array_ref()[3];
+
+                for j in 0..4 {
+                    self.counts[base_idx + j] += 1;
+                }
+            } else {
+                // Process individually
+                for j in 0..4 {
+                    if can_process[j] {
+                        let i = base_idx + j;
+                        self.sums[i] += diffs[j];
+                        self.counts[i] += 1;
+                    }
+                }
+            }
+        }
+
+        // Process remainder
+        for i in remainder_start..num_taus {
+            let t = self.tau_values[i] as usize;
             let min_samples = self.method.min_samples(t);
 
             if current_len >= min_samples {
@@ -328,12 +384,64 @@ impl<M: VarianceMethod> Variance<M> {
         }
     }
 
+    #[cfg(not(feature = "simd"))]
     fn update_incremental_cumulative(&mut self, _old_head: usize) {
         // In cumulative mode, we just add the new calculation
         let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
 
         for (i, &tau) in self.tau_values.iter().enumerate() {
             let t = tau as usize;
+            let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
+            self.sums[i] += new_squared_diff;
+            self.counts[i] += 1;
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    fn update_incremental_cumulative(&mut self, _old_head: usize) {
+        // SIMD version for cumulative mode
+        let new_calc_newest = (self.head + self.buffer.len() - 1) % self.buffer.len();
+        let num_taus = self.tau_values.len();
+
+        // Process in chunks of 4
+        let chunks = num_taus / 4;
+        let remainder_start = chunks * 4;
+
+        for chunk_idx in 0..chunks {
+            let base_idx = chunk_idx * 4;
+
+            // Calculate all 4 diffs
+            let diffs = [
+                self.method.calculate_squared_diff(&self.buffer, new_calc_newest, self.tau_values[base_idx] as usize, self.buffer.len()),
+                self.method.calculate_squared_diff(&self.buffer, new_calc_newest, self.tau_values[base_idx + 1] as usize, self.buffer.len()),
+                self.method.calculate_squared_diff(&self.buffer, new_calc_newest, self.tau_values[base_idx + 2] as usize, self.buffer.len()),
+                self.method.calculate_squared_diff(&self.buffer, new_calc_newest, self.tau_values[base_idx + 3] as usize, self.buffer.len()),
+            ];
+
+            // Update sums using SIMD
+            let sums_vec = f64x4::new([
+                self.sums[base_idx],
+                self.sums[base_idx + 1],
+                self.sums[base_idx + 2],
+                self.sums[base_idx + 3],
+            ]);
+            let diffs_vec = f64x4::new(diffs);
+            let result = sums_vec + diffs_vec;
+
+            self.sums[base_idx] = result.as_array_ref()[0];
+            self.sums[base_idx + 1] = result.as_array_ref()[1];
+            self.sums[base_idx + 2] = result.as_array_ref()[2];
+            self.sums[base_idx + 3] = result.as_array_ref()[3];
+
+            // Update counts
+            for j in 0..4 {
+                self.counts[base_idx + j] += 1;
+            }
+        }
+
+        // Process remainder
+        for i in remainder_start..num_taus {
+            let t = self.tau_values[i] as usize;
             let new_squared_diff = self.method.calculate_squared_diff(&self.buffer, new_calc_newest, t, self.buffer.len());
             self.sums[i] += new_squared_diff;
             self.counts[i] += 1;
@@ -407,6 +515,7 @@ impl<M: VarianceMethod> Variance<M> {
         })
     }
 
+    #[cfg(not(feature = "simd"))]
     fn iter(&self) -> impl Iterator<Item = Tau> + '_ {
         self.tau_values.iter().enumerate().filter_map(move |(i, &tau)| {
             if self.counts[i] == 0 {
@@ -422,6 +531,86 @@ impl<M: VarianceMethod> Variance<M> {
                 deviation,
             })
         })
+    }
+
+    #[cfg(feature = "simd")]
+    fn iter(&self) -> impl Iterator<Item = Tau> + '_ {
+        // Pre-compute variances in batches for better performance
+        let mut results = Vec::with_capacity(self.tau_values.len());
+        let num_taus = self.tau_values.len();
+
+        // Process in chunks of 4
+        let chunks = num_taus / 4;
+        let remainder_start = chunks * 4;
+
+        for chunk_idx in 0..chunks {
+            let base_idx = chunk_idx * 4;
+
+            // Check which ones are valid
+            let valid = [
+                self.counts[base_idx] > 0,
+                self.counts[base_idx + 1] > 0,
+                self.counts[base_idx + 2] > 0,
+                self.counts[base_idx + 3] > 0,
+            ];
+
+            if valid.iter().all(|&x| x) {
+                // All valid - compute with SIMD
+                let sums_vec = f64x4::new([
+                    self.sums[base_idx],
+                    self.sums[base_idx + 1],
+                    self.sums[base_idx + 2],
+                    self.sums[base_idx + 3],
+                ]);
+
+                let divisors_vec = f64x4::new([
+                    self.divisor_factors[base_idx] * self.counts[base_idx] as f64,
+                    self.divisor_factors[base_idx + 1] * self.counts[base_idx + 1] as f64,
+                    self.divisor_factors[base_idx + 2] * self.counts[base_idx + 2] as f64,
+                    self.divisor_factors[base_idx + 3] * self.counts[base_idx + 3] as f64,
+                ]);
+
+                let variances = sums_vec / divisors_vec;
+                let deviations = variances.sqrt();
+
+                for j in 0..4 {
+                    results.push(Tau {
+                        tau: self.tau_values[base_idx + j],
+                        variance: variances.as_array_ref()[j],
+                        deviation: deviations.as_array_ref()[j],
+                    });
+                }
+            } else {
+                // Process individually
+                for j in 0..4 {
+                    let i = base_idx + j;
+                    if valid[j] {
+                        let variance = self.sums[i] / (self.divisor_factors[i] * self.counts[i] as f64);
+                        let deviation = variance.sqrt();
+                        results.push(Tau {
+                            tau: self.tau_values[i],
+                            variance,
+                            deviation,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Process remainder
+        for i in remainder_start..num_taus {
+            if self.counts[i] > 0 {
+                let variance = self.sums[i] / (self.divisor_factors[i] * self.counts[i] as f64);
+                let deviation = variance.sqrt();
+                results.push(Tau {
+                    tau: self.tau_values[i],
+                    variance,
+                    deviation,
+                });
+            }
+        }
+
+        results.into_iter()
     }
 
     fn samples(&self) -> usize {
