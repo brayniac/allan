@@ -331,11 +331,8 @@ struct Variance<M: VarianceMethod> {
     head: usize,
     len: usize,
     total_samples: usize,
-    #[allow(dead_code)] // used in Task 2 (frequency mode)
     data_type: DataType,
-    #[allow(dead_code)] // used in Task 2 (frequency mode)
     phase_acc: f64,
-    #[allow(dead_code)] // used in Task 2 (frequency mode)
     resync: bool,
     sums: Vec<f64>,
     counts: Vec<u64>,
@@ -376,6 +373,28 @@ impl<M: VarianceMethod> Variance<M> {
     }
 
     fn record(&mut self, value: f64) {
+        match self.data_type {
+            DataType::Phase => self.record_phase(value),
+            DataType::Frequency => {
+                if value.is_nan() {
+                    self.resync = true;          // accumulator untouched; gap resets the segment
+                    self.record_phase(f64::NAN); // marks a gap → windows spanning it are dropped
+                } else {
+                    let phase = if self.resync {
+                        self.resync = false;
+                        self.phase_acc = 0.0;
+                        0.0
+                    } else {
+                        self.phase_acc
+                    };
+                    self.phase_acc += value; // x[i] = sum of y over the current contiguous run
+                    self.record_phase(phase);
+                }
+            }
+        }
+    }
+
+    fn record_phase(&mut self, value: f64) {
         self.total_samples += 1;
 
         // NaN indicates a gap in the data - store it but don't compute with it
@@ -1937,5 +1956,74 @@ mod tests {
         // Should still have valid calculations
         let tau1 = allan.get(1);
         assert!(tau1.is_some());
+    }
+
+    // deterministic white-ish noise in [-1, 1), no rand dep
+    fn white(n: usize) -> Vec<f64> {
+        let mut s: u64 = 0x9e3779b97f4a7c15;
+        (0..n).map(|_| {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        }).collect()
+    }
+    fn slope(points: &[(u32, f64)]) -> f64 {
+        let pts: Vec<(f64, f64)> = points.iter().filter(|(_, d)| *d > 0.0)
+            .map(|(t, d)| ((*t as f64).ln(), d.ln())).collect();
+        let n = pts.len() as f64;
+        let mx = pts.iter().map(|p| p.0).sum::<f64>() / n;
+        let my = pts.iter().map(|p| p.1).sum::<f64>() / n;
+        let num: f64 = pts.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+        let den: f64 = pts.iter().map(|p| (p.0 - mx).powi(2)).sum();
+        num / den
+    }
+
+    #[test]
+    fn frequency_white_noise_slope_half() {
+        let data = white(4000);
+        let mut a = Config::new().max_tau(500).data_type(DataType::Frequency).build_allan();
+        for v in &data { a.record(*v); }
+        let pts: Vec<(u32, f64)> = a.iter().map(|t| (t.tau(), t.deviation().unwrap())).collect();
+        assert!(pts.len() >= 4);
+        let sl = slope(&pts);
+        assert!((sl + 0.5).abs() < 0.15, "white-frequency slope {sl} not ≈ -0.5");
+        let s1 = pts.iter().find(|(t, _)| *t == 1).map(|(_, d)| *d).unwrap();
+        assert!((s1 - 0.577).abs() < 0.15, "sigma(1) {s1} not ≈ 0.577");
+    }
+
+    #[test]
+    fn frequency_equivalence_with_phase_cumsum() {
+        let y = white(2000);
+        let mut phase = Vec::with_capacity(y.len());
+        let mut acc = 0.0;
+        for v in &y { phase.push(acc); acc += v; }
+        let mut fa = Config::new().max_tau(300).data_type(DataType::Frequency).build_allan();
+        for v in &y { fa.record(*v); }
+        let mut pa = Config::new().max_tau(300).data_type(DataType::Phase).build_allan();
+        for v in &phase { pa.record(*v); }
+        for t in [1u32, 2, 5, 10, 50, 100] {
+            let f = fa.get(t as usize).and_then(|x| x.deviation());
+            let p = pa.get(t as usize).and_then(|x| x.deviation());
+            if let (Some(f), Some(p)) = (f, p) {
+                assert!((f - p).abs() <= 1e-9 * p.max(1.0), "tau {t}: freq {f} != phase-cumsum {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn frequency_constant_is_near_zero() {
+        let mut a = Config::new().max_tau(100).data_type(DataType::Frequency).build_allan();
+        for _ in 0..500 { a.record(7.0); }
+        assert!(a.iter().all(|t| t.deviation().unwrap() < 1e-9));
+    }
+
+    #[test]
+    fn frequency_gaps_stay_finite() {
+        let mut a = Config::new().max_tau(100).data_type(DataType::Frequency).build_allan();
+        let data = white(1000);
+        for (i, v) in data.iter().enumerate() {
+            a.record(if i % 137 == 0 { f64::NAN } else { *v });
+        }
+        assert!(a.iter().all(|t| t.deviation().map(|d| d.is_finite()).unwrap_or(true)));
+        assert!(a.iter().any(|t| t.deviation().map(|d| d > 0.0).unwrap_or(false)));
     }
 }
