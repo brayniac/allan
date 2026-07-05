@@ -331,6 +331,12 @@ struct Variance<M: VarianceMethod> {
     head: usize,
     len: usize,
     total_samples: usize,
+    #[allow(dead_code)] // used in Task 2 (frequency mode)
+    data_type: DataType,
+    #[allow(dead_code)] // used in Task 2 (frequency mode)
+    phase_acc: f64,
+    #[allow(dead_code)] // used in Task 2 (frequency mode)
+    resync: bool,
     sums: Vec<f64>,
     counts: Vec<u64>,
     tau_values: Vec<u32>,
@@ -363,6 +369,9 @@ impl<M: VarianceMethod> Variance<M> {
             head: 0,
             len: 0,
             total_samples: 0,
+            data_type: config.data_type,
+            phase_acc: 0.0,
+            resync: true,
         }
     }
 
@@ -928,6 +937,17 @@ impl Default for ModifiedAllan {
     }
 }
 
+/// Whether recorded samples are phase (time-error) data or frequency data. Frequency data is
+/// integrated to phase on input so the phase-domain estimator yields the frequency-domain result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataType {
+    /// Samples are phase/time-error values `x` (default; classic Allan input).
+    #[default]
+    Phase,
+    /// Samples are frequency values `y` (integrated internally).
+    Frequency,
+}
+
 /// Calculation mode - cumulative or sliding window
 ///
 /// Both modes use the same amount of memory (a ring buffer of size min_samples(max_tau)).
@@ -969,6 +989,7 @@ pub struct Config {
     max_tau: usize,
     style: Style,
     mode: Mode,
+    data_type: DataType,
 }
 
 impl Default for Config {
@@ -977,6 +998,7 @@ impl Default for Config {
             max_tau: 1_000,
             style: Style::DecadeDeci,
             mode: Mode::default(),
+            data_type: DataType::default(),
         }
     }
 }
@@ -998,6 +1020,11 @@ impl Config {
 
     pub fn mode(mut self, mode: Mode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn data_type(mut self, data_type: DataType) -> Self {
+        self.data_type = data_type;
         self
     }
 
@@ -1880,6 +1907,12 @@ mod tests {
         // Now we should have tau=2
         assert!(allan.get(2).is_some());
         assert!(allan.get(2).unwrap().variance().is_some());
+    }
+
+    #[test]
+    fn datatype_default_is_phase() {
+        assert_eq!(DataType::default(), DataType::Phase);
+        let _c = Config::new().data_type(DataType::Frequency);
     }
 
     #[test]
