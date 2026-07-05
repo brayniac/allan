@@ -16,6 +16,13 @@
 //! calculations that would span the gap are automatically excluded from the
 //! variance computation, ensuring accurate results even with incomplete data.
 //!
+//! By default samples are treated as phase (time-error) data. To analyze frequency data, set
+//! `.data_type(DataType::Frequency)` on the builder — samples are integrated to phase internally,
+//! yielding the frequency-domain Allan deviation in the input's units (white noise → slope -1/2).
+//! Note: in Frequency mode the internal phase accumulator grows as the running sum of inputs over
+//! each contiguous (gap-free) run; NaN gaps reset it. This matches the phase-domain path and is
+//! fine for normal inputs.
+//!
 //! # Example
 //!
 //! Create a new instance, add a few records, retrieve allan deviation
