@@ -19,9 +19,9 @@
 //! By default samples are treated as phase (time-error) data. To analyze frequency data, set
 //! `.data_type(DataType::Frequency)` on the builder — samples are integrated to phase internally,
 //! yielding the frequency-domain Allan deviation in the input's units (white noise → slope -1/2).
-//! Note: in Frequency mode the internal phase accumulator grows as the running sum of inputs over
-//! each contiguous (gap-free) run; NaN gaps reset it. This matches the phase-domain path and is
-//! fine for normal inputs.
+//! Note: in Frequency mode the internal phase accumulator is the running sum of all inputs (a NaN
+//! gap omits one increment but keeps the integral continuous — it is not reset, which would inflate
+//! σ at τ≥2). This matches the phase-domain path and is fine for normal inputs.
 //!
 //! # Example
 //!
@@ -340,7 +340,6 @@ struct Variance<M: VarianceMethod> {
     total_samples: usize,
     data_type: DataType,
     phase_acc: f64,
-    resync: bool,
     sums: Vec<f64>,
     counts: Vec<u64>,
     tau_values: Vec<u32>,
@@ -375,7 +374,6 @@ impl<M: VarianceMethod> Variance<M> {
             total_samples: 0,
             data_type: config.data_type,
             phase_acc: 0.0,
-            resync: true,
         }
     }
 
@@ -384,17 +382,15 @@ impl<M: VarianceMethod> Variance<M> {
             DataType::Phase => self.record_phase(value),
             DataType::Frequency => {
                 if value.is_nan() {
-                    self.resync = true;          // accumulator untouched; gap resets the segment
-                    self.record_phase(f64::NAN); // marks a gap → windows spanning it are dropped
+                    // Gap: emit the marker (windows landing on it are dropped) but keep the phase
+                    // accumulator CONTINUOUS. Resetting it here would create a baseline jump that
+                    // wider (τ≥2) overlapping windows straddle *without* landing on the NaN,
+                    // inflating σ. A continuous integral avoids that; the gap just omits one
+                    // increment (a bounded ms-scale effect for sparse gaps).
+                    self.record_phase(f64::NAN);
                 } else {
-                    let phase = if self.resync {
-                        self.resync = false;
-                        self.phase_acc = 0.0;
-                        0.0
-                    } else {
-                        self.phase_acc
-                    };
-                    self.phase_acc += value; // x[i] = sum of y over the current contiguous run
+                    let phase = self.phase_acc;
+                    self.phase_acc += value; // x[i] = running integral of y (continuous across gaps)
                     self.record_phase(phase);
                 }
             }
@@ -2032,5 +2028,30 @@ mod tests {
         }
         assert!(a.iter().all(|t| t.deviation().map(|d| d.is_finite()).unwrap_or(true)));
         assert!(a.iter().any(|t| t.deviation().map(|d| d > 0.0).unwrap_or(false)));
+    }
+
+    // Regression: sparse gaps must NOT inflate σ. A reset-at-gap integrator creates a phase
+    // discontinuity that τ≥2 overlapping windows straddle without landing on the NaN, blowing up
+    // σ(τ≥2) while leaving σ(1) correct (a spurious dip). A continuous integrator stays ≈ the
+    // gap-free curve.
+    #[test]
+    fn frequency_gaps_do_not_inflate() {
+        let data = white(6000);
+        let mut clean = Config::new().max_tau(300).data_type(DataType::Frequency).build_allan();
+        for v in &data {
+            clean.record(*v);
+        }
+        let mut gappy = Config::new().max_tau(300).data_type(DataType::Frequency).build_allan();
+        for (i, v) in data.iter().enumerate() {
+            gappy.record(if i % 50 == 0 { f64::NAN } else { *v }); // 2% gaps
+        }
+        for tau in [2u32, 5, 10, 20, 50] {
+            let c = clean.get(tau as usize).and_then(|x| x.deviation()).unwrap();
+            let g = gappy.get(tau as usize).and_then(|x| x.deviation()).unwrap();
+            assert!(
+                (g - c).abs() < 0.25 * c,
+                "tau {tau}: gappy σ {g} inflated vs clean σ {c}"
+            );
+        }
     }
 }
